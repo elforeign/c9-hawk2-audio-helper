@@ -1,8 +1,8 @@
 #!/bin/sh
-# HDMI1 audio EDID only. Disable via /var/lib/glasshouse-c9-edid/control disable.
+# A pending durable recovery must run even when startup application is disabled.
 D=/var/lib/glasshouse-c9-edid
-[ -f "$D/enabled" ] || exit 0
+[ -f "$D/enabled" ] || [ -f "$D/operation.json" ] || [ -f "$D/disable-requested" ] || exit 0
 mkdir -p /tmp/glasshouse-c9-edid
 chmod 700 /tmp/glasshouse-c9-edid
-nohup /usr/bin/python "$D/service.py" daemon </dev/null >/tmp/glasshouse-c9-edid/service.log 2>&1 &
+nohup /usr/bin/python -B "$D/service.py" daemon </dev/null >/tmp/glasshouse-c9-edid/service.log 2>&1 &
 exit 0

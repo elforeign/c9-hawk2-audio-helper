@@ -1,127 +1,155 @@
 # C9 HAWK2 audio EDID helper
 
-Manual prototype for the C9 → Sonos eARC case where a Panasonic UB820 sends
-stereo PCM directly, but PCM 5.1 through a fixed-EDID splitter. This is not a
-Glasshouse dashboard feature and is not installed by `deploy.sh` or the IPK.
+Experimental, opt-in runtime EDID helper for the C9 → Sonos eARC case where a
+Panasonic UB820 sends stereo PCM directly, but PCM 5.1 through a fixed-EDID
+splitter. This is a separate project from Glasshouse; installing or updating
+Glasshouse does not install this helper.
 
-The underlying transaction and startup service passed trials on an
-OLED65C9PUA, webOS 4.10.2, firmware 05.50.00. This per-TV backup adaptation
-has not yet been run on a TV. It remains an experimental prototype.
-It supports only the exact two firmware fingerprints in `state.py`, the
-measured HAWK2/TrueHD declaration, and the measured 29-file calibration layout.
-Other C9 firmware or regions are not implicitly supported.
+The earlier single-TV implementation passed audible PCM 5.1 and Atmos trials
+on HDMI 1 of an OLED65C9PUA, webOS 4.10.2, firmware 05.50.00. **This generalized
+installer and multi-port coordinator have only offline validation. HDMI 3 and
+4 have not been written or playback-tested on hardware.** They remain opt-in.
+Only the two exact firmware fingerprints in `state.py`, HAWK2/TrueHD hardware
+declarations and the measured 29-file calibration layout are accepted.
 
-## What it changes
+## Per-input profiles
 
-HDMI 1 only: PCM maximum channels 8 → 6; sample rates through 48 kHz; a
-standard 5.1 speaker-allocation block. DTS-HD's bitstream descriptor is removed
-to make room in 256 bytes. The Panasonic decodes DTS/DTS-HD to PCM. AC3, EAC3,
-MAT, the base EDID, video/HDR/Dolby Vision blocks and detailed timing stay
-byte-identical. Core DTS remains declared. Other HDMI ports are verified
-against their own originals.
+The default selection is HDMI 1 only. HDMI 3 and 4 can be selected separately.
+HDMI 2 is reserved for the eARC soundbar and is rejected before native console
+access. Every operation verifies all four inputs against their own saved
+original or known candidate; HDMI 2 must always match its original.
 
-This advertises capabilities; it adds no decoder to the TV or Sonos. The
-combined edit solved the measured case; which individual field causes the
-UB820's stereo choice was not isolated.
+Each candidate is generated from that input's own immutable original. The
+builder changes PCM maximum channels 8 → 6, limits PCM rates to 32/44.1/48 kHz,
+and adds a standard 5.1 speaker-allocation block. It removes the DTS-HD
+bitstream descriptor to fit 256 bytes. Core DTS, Dolby declarations, each
+port's CEC physical address, base EDID, video/HDR/Dolby Vision blocks and
+detailed timings are preserved. Copying HDMI 1's EDID to HDMI 3 or 4 is refused.
 
-The existing native TV-service runtime writer is used through its diagnostic
-console. Entry briefly changes one firmware-specific console-mode RAM word;
-it is restored before the EDID load. F10 is queued while only the blocked
-keyboard thread is briefly paused with ptrace, then detached with no register
-or code changes. Console print/output flags are restored afterward. The
-independent worker restores the original EDID if the controller does not hand
-off verified success, or if post-load preservation/cleanup checks fail. An unfinished controlling
-helper is stopped before recovery so it cannot issue a delayed write.
-No flash-download or raw I2C route is used. A runtime load briefly renegotiates
-HDMI and can interrupt playback. Software recovery cannot run through power
-loss or guarantee recovery from every hardware fault.
+This advertises capabilities; it adds no decoder. The player must decode
+DTS/DTS-HD to PCM. The combined edit solved the observed UB820 case; the
+individual cause of its stereo choice has not been isolated. The six-channel
+profile can restrict a source that already supports PCM 7.1, so enable it only
+on inputs that need it. Native TV apps use a separate playback path.
 
-## Preconditions
+## Safety and recovery
 
-Use root SSH on the TV and keep a separate SSH session available. Obtain a
-calibration backup separately: this helper captures preservation hashes and
-white-balance values, **not the calibration/LUT files or EEPROM**. Do not run
-it alongside another EDID tool or a diagnostic-console session.
+One coordinator serializes all selected inputs. A durable journal stores the
+exact before/after state of all four EDIDs, the persistent selection, and the
+immutable backup identity before any native write. A trial restores its exact
+preimage, including an already working HDMI 1 override. Restoring one input
+leaves other selected inputs intact. Interrupted uncommitted operations roll
+back; a durable commit is completed on recovery. Failed apply recovery also
+disables automatic application to avoid a retry loop.
 
-Use the UB820 directly on HDMI 1 and Sonos on HDMI 2. Player DTS/DTS-HD is PCM,
-Sound Effects Off; Dolby settings remain as tested. TV HDMI 1 input audio is
-Bitstream, Digital Sound Output Pass Through, eARC On.
+The root-only backup, operation journal, native worker results and completed
+history are under `/var/lib/glasshouse-c9-edid`, with atomic file replacement
+and file/directory fsync. Originals are never regenerated or overwritten.
+Schema-one backups are validated and adapted in memory without rewriting them.
+The startup hook runs for pending recovery even if automatic application is
+disabled. Recovery waits for an Active TV; it never wakes it.
 
-## Explicit installation
+The native writer uses diagnostic-console **runtime menu 5** and the selected
+logical port's `/tmp/edid_N.bin`. It does not use flash-download or raw I2C.
+Its independent worker verifies console detachment, restores console RAM
+flags, and restores the per-port preimage if the controller fails. An
+unfinished same-boot console session blocks all further writes until cleanup
+is proven; old PIDs or RAM snapshots are never replayed after reboot. See
+[recovery instructions](docs/RECOVERY.md).
 
-Copy this folder alone to `/tmp/c9-hawk2-edid` using the existing authenticated
-SSH/SCP setup. No account, key or TV address is supplied by this repository.
-On the active TV:
+Runtime loads renegotiate HDMI and briefly interrupt playback. Software
+recovery cannot execute while power is off or guarantee recovery from every
+hardware fault. Firmware changes fail the binary checks before console access;
+never bypass these checks to force a restore.
+
+## Prepare without applying
+
+Use root SSH with a second authenticated session available. Keep a separate,
+verified calibration backup: this helper records preservation hashes and
+white-balance values, **not calibration/LUT files or EEPROM**. Calibration and
+OLED protections are read and compared, never changed. Do not run another EDID
+service or diagnostic-console session alongside this helper.
+
+Copy this folder alone to `/tmp/c9-hawk2-edid` using your existing authenticated
+SSH/SCP setup. No TV address or credentials are included. On an Active TV with
+unmodified input EDIDs:
 
 ```sh
 sh /tmp/c9-hawk2-edid/install.sh --prepare
-```
-
-The installer captures each TV's own original EDIDs and preservation baseline
-under `/var/lib/glasshouse-c9-edid`, root-only. It never replaces an existing
-backup and refuses unvalidated firmware, hardware, audio declarations or
-calibration layout. Files include `backup.json`, `original-hdmi1.bin` and
-`candidate-hdmi1.bin`; copy them privately off the TV before further testing.
-Do not submit them in a public issue or PR.
-
-`--prepare` installs files without a native EDID write or automatic startup.
-After copying the backup off the TV, an explicit manual apply can be tested:
-
-```sh
-/usr/bin/python /var/lib/glasshouse-c9-edid/transaction.py apply
-/var/lib/glasshouse-c9-edid/control disable
-```
-
-Wait for the transaction result under its printed guard directory before
-accepting either outcome. After rollback is verified, explicitly enable
-startup with `sh /tmp/c9-hawk2-edid/install.sh --enable`.
-
-The opt-in hook `/var/lib/webosbrew/init.d/60-glasshouse-c9-edid` starts a
-small Python 2.7 service, separate from Glasshouse. Every 30 seconds it reads
-power state and, only while Active, HDMI 1. It applies only after two reads
-of the exact original EDID. Applications are at least five minutes apart,
-with three allowed per service run. Unknown EDIDs or a transaction failure
-stop application. Firmware changes fail the binary checks before console
-access. Existing Glasshouse startup hooks are not edited.
-
-```sh
 /var/lib/glasshouse-c9-edid/control status
-/var/lib/glasshouse-c9-edid/control disable
 ```
 
-Disable removes the enable marker, waits for the service and restores/verifies
-the saved original. After successful disable, the hook can be removed; retain
-the private backup. If the firmware changed, first remove the enable marker
-manually to prevent startup attempts; do not bypass the fingerprint check to
-force a restore through unvalidated addresses.
+Preparation installs the recovery hook and captures all four originals in
+`backup.json`, plus separate original/candidate binary files for HDMI 1, 3 and
+4. It performs no native EDID write and does not enable automatic application.
+Copy the entire backup privately off the TV before a trial. Never post its
+contents, logs, full EDIDs or calibration data in a public issue.
 
-Each transaction has a private `/tmp/glasshouse-c9-edid-txn-*` result. Current
-service state/logs are in `/tmp/glasshouse-c9-edid`. Logs may contain TV data;
-share a redacted outcome rather than the complete files. No network listener
-is added. Do not run either Python entry point with `-O`.
+For an existing working HDMI 1 service, use the explicit migration procedure
+in [RECOVERY.md](docs/RECOVERY.md). Do not install a second writer or capture a
+modified EDID as its factory original.
 
-## Test sequence
+## Explicit controls
 
-1. Compare native HDMI 1 readback with the generated candidate, and HDMI 2–4
-   with their originals. Confirm console detachment, factory white balance,
-   calibration hashes and OLED-protection readbacks before accepting a commit.
-2. Play the same DTS-HD track: UB820 HDMI info should show PCM 5.1, and Sonos
-   should report audible Multichannel PCM 5.1. Confirm Atmos with a known
-   Atmos disc under the same candidate. Record its transport subtype if shown.
-3. Disable and verify exact original restoration, then re-enable deliberately.
-4. Reboot, confirm a changed boot ID and automatic candidate readback, then
-   repeat listening checks. Test standby/wake and HDMI/input changes separately.
+All commands below run on the TV after preparation. HDMI 2 is never accepted.
 
-The original single-TV implementation passed PCM 5.1 and Atmos playback,
-independent rollback after controller exit, disable/restore and autonomous
-reapplication after a reboot. Its final listening check after reboot was
-not performed. Other sources, LPCM 7.1, native high-rate PCM, DTS:X, other
-firmware and other models were not validated. No claim is made about HAWK2
-runtime state surviving loss of power; startup reapplication supplies persistence.
+```sh
+# Save a selection while automatic application is disabled; no EDID write.
+/var/lib/glasshouse-c9-edid/control select 1,3,4
 
-## Offline preparation for a later 7.1 test
+# Trial one input for at most 180 seconds, then restore its exact preimage.
+# The detached worker continues after the SSH command exits.
+/var/lib/glasshouse-c9-edid/control trial 3 --seconds 180
+/var/lib/glasshouse-c9-edid/control status
+/var/lib/glasshouse-c9-edid/control stop-trial
 
-On a computer, starting with a private factory-original HDMI 1 EDID:
+# Apply the saved selection once; this alone does not enable startup.
+/var/lib/glasshouse-c9-edid/control apply
+
+# Restore only HDMI 3 and remove it from the saved selection.
+/var/lib/glasshouse-c9-edid/control restore 3
+
+# Enable automatic reapplication of the saved selection.
+/var/lib/glasshouse-c9-edid/control enable
+
+# Asynchronously stop automatic application and restore all writable inputs.
+# Wait for "disabled; originals verified" and no pending recovery.
+/var/lib/glasshouse-c9-edid/control disable
+/var/lib/glasshouse-c9-edid/control status
+```
+
+`select none` saves an empty selection. `disable` retains the selection for a
+later deliberate `enable`. Selection changes require automatic application to
+be disabled; an active override must be restored before deselecting that input.
+A trial does not change the selection. Do not invoke `transaction.py` directly:
+it requires an active coordinated intent and owner identity.
+
+The monitor checks every 30 seconds while enabled. It applies after two stable
+input reads, at least five minutes between application cycles, with at most
+three cycles per daemon run. A busy trial is left alone. Unknown EDIDs,
+calibration/OLED changes or mutation failures stop automatic application and
+retain pending recovery. Status/logs in `/tmp/glasshouse-c9-edid` are
+supplementary; persistent `operation.json` and transaction results are the
+recovery authority. No network listener is added. Python 2.7 is required on the
+TV; never use `-O`.
+
+## Qualification and tests
+
+Follow the [at-home test checklist](docs/TESTING.md) before enabling another
+input. The public tests use synthetic EDIDs and an injected fake TV backend;
+they exercise coordination and faults without opening a console or connecting
+to a TV:
+
+```sh
+python3 -m unittest discover -s test -p 'test_*.py'
+```
+
+Offline tests do not qualify firmware console behavior, HDMI 3/4 routing,
+audible channel mapping or standby/reboot reliability on hardware.
+
+## Separate 7.1 investigation
+
+`prepare-trial.py` can build a private **offline-only** eight-channel candidate:
 
 ```sh
 python3 prepare-trial.py \
@@ -129,41 +157,15 @@ python3 prepare-trial.py \
   --output-directory /private/path/new-pcm71-trial
 ```
 
-The output directory must not exist. It contains a manifest, the unchanged
-six-channel fallback and `TRIAL-NOT-INSTALLED-pcm71.bin`, all private. The
-trial retains the same PCM rate limit and Dolby declarations but advertises
-eight PCM channels and an additional rear speaker pair. It has not been
-playback-tested. This command connects to no TV and does not install a
-transaction or change the startup profile.
+It connects to no TV. The output directory must not exist. It contains a
+manifest, the six-channel fallback and `TRIAL-NOT-INSTALLED-pcm71.bin`.
+The live coordinator accepts only `pcm51-48k`; it cannot install that trial.
+A future 7.1 implementation needs independently verified preimage recovery and
+true discrete channel-identification listening tests. An eight-channel
+InfoFrame or upmixed 5.1 track does not establish correct 7.1 routing.
 
-Do not pass the trial to the six-channel installer or run a second EDID
-service. When a working six-channel override is already installed, a future
-bounded trial needs its own independent rollback to that exact working EDID,
-plus restoration of the original service enable state. Verify this recovery
-before listening tests. The factory-original restore command above deliberately
-restores the factory EDID; it is not that trial's fallback.
-
-Once recovery is verified, record a true 7.1 channel-identification track at
-the Panasonic and receiver, then repeat the known DTS-HD 5.1 and Atmos tests.
-Keep Sound Effects Off. An eight-channel InfoFrame or upmixed 5.1 track alone
-does not verify the seven discrete speaker channels or LFE. No 7.1 profile
-should be made persistent before audible routing and the 5.1 fallback pass.
-
-## Status and offline checks
-
-This standalone project contains the helper extracted from Glasshouse PR #1078.
-The generalized
-per-TV installer remains experimental and has not been qualified on hardware.
-It must not replace an existing C9 audio service during an ongoing trial.
-
-```sh
-python3 test/test_edid.py
-```
-
-The helper is maintained separately from Glasshouse because it uses LG's
-firmware-specific diagnostic console to alter runtime HDMI capabilities.
-Glasshouse's read-only Audio diagnostics are tracked in
+Glasshouse's read-only Audio diagnostics are in
 [PR 1081](https://github.com/rorygallagher2024/glasshouse/pull/1081).
 The G5 compressed-DTS forwarding work in
 [PR 1007](https://github.com/rorygallagher2024/glasshouse/pull/1007)
-is an independent implementation and supplies no C9 or Sonos DTS-HD decoder.
+is independent and supplies no C9 or Sonos DTS-HD/DTS:X decoder.
