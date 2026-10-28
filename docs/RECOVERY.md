@@ -4,6 +4,11 @@ These instructions describe the new helper. They are not authorization to
 replace an existing working implementation unattended. Keep original backups
 and the previous service available privately until qualification is complete.
 
+Recovery here means **HDMI EDID recovery**. No command in this document
+restores picture calibration, calibration files or EEPROM. Integrity readings
+are used only to check that an audio operation left them unchanged. See
+[backup scope](BACKUP-SCOPE.md) before planning recovery from a factory reset.
+
 ## Pending recovery
 
 ```sh

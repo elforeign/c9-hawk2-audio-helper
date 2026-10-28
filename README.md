@@ -5,6 +5,11 @@ Panasonic UB820 sends stereo PCM directly, but PCM 5.1 through a fixed-EDID
 splitter. This is a separate project from Glasshouse; installing or updating
 Glasshouse does not install this helper.
 
+This helper's backup is **HDMI EDID rollback data**, not a TV or calibration
+backup. It cannot restore a professional calibration after a factory reset.
+Glasshouse's Settings backup is separate and also does not include professional
+picture calibration. See [backup scope](docs/BACKUP-SCOPE.md).
+
 The earlier single-TV implementation passed audible PCM 5.1 and Atmos trials
 on HDMI 1 of an OLED65C9PUA, webOS 4.10.2, firmware 05.50.00. **This generalized
 installer and multi-port coordinator have only offline validation. HDMI 3 and
@@ -70,6 +75,9 @@ white-balance values, **not calibration/LUT files or EEPROM**. Calibration and
 OLED protections are read and compared, never changed. Do not run another EDID
 service or diagnostic-console session alongside this helper.
 
+No calibration archive is imported, created or restored by the audio workflow.
+Its read-only integrity checks do not depend on a calibration-backup tool.
+
 Copy this folder alone to `/tmp/c9-hawk2-edid` using your existing authenticated
 SSH/SCP setup. No TV address or credentials are included. On an Active TV with
 unmodified input EDIDs:
@@ -80,7 +88,8 @@ sh /tmp/c9-hawk2-edid/install.sh --prepare
 ```
 
 Preparation installs the recovery hook and captures all four originals in
-`backup.json`, plus separate original/candidate binary files for HDMI 1, 3 and
+the private **EDID rollback record** `backup.json`, plus separate
+original/candidate binary files for HDMI 1, 3 and
 4. It performs no native EDID write and does not enable automatic application.
 Copy the entire backup privately off the TV before a trial. Never post its
 contents, logs, full EDIDs or calibration data in a public issue.

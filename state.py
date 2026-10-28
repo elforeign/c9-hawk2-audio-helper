@@ -1,4 +1,7 @@
-"""Private per-TV backup and read-only firmware/preservation checks."""
+"""Private per-TV EDID rollback data and read-only integrity checks.
+
+The integrity snapshot is not a restorable picture-calibration archive.
+"""
 
 from __future__ import print_function
 import glob
