@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python /var/lib/glasshouse-c9-edid/service.py "${1:-status}"
