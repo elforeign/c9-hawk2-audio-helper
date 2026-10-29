@@ -75,6 +75,7 @@ def luna(uri, payload):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        close_fds=True,
     )
     raw = process.stdout.read()
     process.stderr.read()

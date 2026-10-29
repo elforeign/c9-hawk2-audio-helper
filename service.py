@@ -4,12 +4,64 @@ from __future__ import print_function
 import errno
 import os
 import sys
+import subprocess
 import coordinator
 import profiles
 import state
 import storage
 
 RUN = "/tmp/glasshouse-c9-edid"
+
+
+def recovery_ready(root, backup):
+    try:
+        value = storage.read_json(RUN + "/ready.json")
+    except (IOError, OSError) as error:
+        if error.errno == errno.ENOENT:
+            return None
+        raise
+    if value.get("boot_id") != coordinator.boot_id():
+        return None
+    pid = value.get("pid")
+    if type(pid) is not int or pid <= 1:
+        raise ValueError("Invalid recovery monitor identity")
+    try:
+        with open("/proc/%d/stat" % pid) as source:
+            fields = source.read().rsplit(")", 1)[1].split()
+            if fields[0] == "Z":
+                return None
+            started = fields[19]
+        with open("/proc/%d/cmdline" % pid, "rb") as source:
+            command = source.read().split(b"\0")
+    except (IOError, OSError) as error:
+        if error.errno == errno.ENOENT:
+            return None
+        raise
+    if started != value.get("started"):
+        return None
+    if (
+        value.get("protocol") != 1
+        or value.get("root") != root
+        or value.get("backup_id") != profiles.backup_id(backup)
+        or (root + "/service.py").encode("utf8") not in command
+        or b"daemon" not in command
+    ):
+        raise ValueError("Recovery monitor does not match this installation")
+    return value
+
+
+def ensure_recovery(root, backup):
+    if recovery_ready(root, backup):
+        return
+    # The operation journal already exists, so the recovery hook starts even
+    # if automatic profile application has never been enabled.
+    subprocess.check_call(["/var/lib/webosbrew/init.d/60-glasshouse-c9-edid"], close_fds=True)
+    deadline = coordinator.monotonic() + 8
+    while coordinator.monotonic() < deadline:
+        if recovery_ready(root, backup):
+            return
+        __import__("time").sleep(0.05)
+    raise RuntimeError("Independent recovery monitor did not become ready; no native write")
 
 
 def report(value):
@@ -22,8 +74,22 @@ def daemon():
     storage.directory(RUN)
     try:
         with storage.lock(RUN + "/daemon.lock"):
-            return monitor(coordinator.Engine())
-    except IOError as error:
+            engine = coordinator.Engine()
+            ready = {
+                "protocol": 1,
+                "root": engine.root,
+                "backup_id": profiles.backup_id(engine.backup),
+                "boot_id": coordinator.boot_id(),
+                "pid": os.getpid(),
+                "started": coordinator.process_identity(),
+            }
+            storage.write_json(RUN + "/ready.json", ready)
+            try:
+                return monitor(engine)
+            finally:
+                os.unlink(RUN + "/ready.json")
+                storage.sync_directory(RUN)
+    except (IOError, OSError) as error:
         if error.errno in (errno.EACCES, errno.EAGAIN):
             return 0
         raise
@@ -95,7 +161,7 @@ def monitor(engine):
             if status != last_status:
                 report(status)
                 last_status = status
-        except IOError as error:
+        except (IOError, OSError) as error:
             if error.errno not in (errno.EACCES, errno.EAGAIN):
                 raise
             # A detached trial owns the operation lock. Do not disable it or
@@ -123,7 +189,7 @@ def monitor(engine):
                 report({"state": "waiting for services", "error": str(error)})
                 last_status = "not-ready"
         # This process exists in standby only to retain a pending recovery.
-        for unused in range(150):
+        for unused in range(10 if os.path.isfile(engine.root + "/operation.json") else 150):
             if not (
                 os.path.exists(engine.root + "/enabled")
                 or os.path.isfile(engine.root + "/operation.json")

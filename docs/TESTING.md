@@ -1,8 +1,31 @@
 # At-home qualification checklist
 
-Status: the multi-port coordinator is offline-tested only. Do not replace a
-working HDMI 1 service while away from the TV. No hardware test on HDMI 3 or 4
-has been performed for this version.
+Status on 28 October 2026: C9 Python 2.7 synthetic fixtures, preparation and
+no-op trial-worker termination/recovery passed with zero native EDID writes.
+The original HDMI 1 monitor resumed. With the Panasonic UB820 directly
+connected and Sonos Arc on HDMI 2, the owner confirmed:
+
+| Input | Original/current baseline | Temporary six-channel profile | Atmos with profile |
+| --- | --- | --- | --- |
+| HDMI 1 | Existing persistent workaround: audible Multichannel PCM 5.1 | Existing candidate retained for the no-op recovery proof | Dolby Atmos with normal sound |
+| HDMI 3 | Stereo PCM with sound | Multichannel PCM 5.1 with normal sound | Dolby Atmos with normal sound |
+| HDMI 4 | Stereo PCM with sound | Multichannel PCM 5.1 with normal sound | Dolby Atmos with normal sound |
+
+The DTS source was the I, Robot DTS-HD track, decoded to PCM by the player with
+Sound Effects Off. A fresh player channel/rate readout and discrete channel
+identification were not recorded for the HDMI 3/4 trials; Sonos labels and
+audible output are owner observations. Each HDMI 3/4 trial ended with exact
+all-four EDID restoration verified twice, clean native-console cleanup,
+unchanged calibration/OLED checks, no pending operation and the legacy monitor
+resumed. HDMI 2 was never a write target. The first HDMI 4 DTS window expired
+before an owner observation; a separate repeated trial supplied the result.
+
+The generalized helper is prepared with startup disabled and selection HDMI 1.
+The original HDMI 1 implementation remains responsible for normal startup.
+Combined apply, single-port restore with other profiles active, and generalized
+reboot/standby/input-switch reliability remain pending. Native-app DTS and true
+PCM 7.1 playback remain separate, untested investigations. Do not replace a
+working service while away from the TV.
 
 1. Preserve the existing working HDMI 1 implementation, original EDID and
    verified calibration backup off the TV. Review migration and recovery first.
@@ -20,6 +43,10 @@ has been performed for this version.
    native result and exact all-port/preservation readbacks. Confirm native
    console cleanup and no pending journal. Do not accept success from a
    detached worker's startup message alone.
+   First run a no-op HDMI 1 timed trial against the already working candidate
+   with automatic application disabled. Confirm recovery-monitor readiness,
+   terminate only that trial worker, and verify automatic journal recovery,
+   all-port equality and no native write. Do not proceed if this fails.
 5. Trial HDMI 3 alone using `control trial 3 --seconds 180`. First verify the
    preimage includes any working HDMI 1 candidate. Moving the test source to
    HDMI 3 briefly interrupts playback; move only when physically ready.

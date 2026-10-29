@@ -6,7 +6,7 @@ import errno
 import os
 import re
 import subprocess
-import threading
+import signal
 import time
 import uuid
 import profiles
@@ -43,6 +43,35 @@ def process_identity():
 def monotonic():
     with open("/proc/uptime") as source:
         return float(source.read().split()[0])
+
+
+def run_controller(command, environment, seconds=65):
+    # The C9's minimal Python has signal and subprocess, but no threading.
+    # The controller remains a direct child, preserving journal ownership.
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    pending = signal.alarm(0)
+    if pending:
+        signal.alarm(pending)
+        raise ValueError("An existing alarm owns the controller timeout")
+    process = [None]
+
+    def expired(signum, frame):
+        try:
+            process[0].kill()
+        except OSError as error:
+            if error.errno != errno.ESRCH:
+                raise
+
+    signal.signal(signal.SIGALRM, expired)
+    try:
+        process[0] = subprocess.Popen(command, env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+        signal.alarm(seconds)
+        output, error = process[0].communicate()
+        return process[0].returncode, output, error
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def configuration(ports):
@@ -123,6 +152,7 @@ class Engine(object):
         clock=None,
         sleep=None,
         fault=None,
+        recovery=None,
     ):
         self.root = root or state.BASE
         self.backup = profiles.normalize_backup(backup or state.load_backup())
@@ -138,10 +168,15 @@ class Engine(object):
         self.clock = clock or monotonic
         self.sleep = sleep or time.sleep
         self.fault = fault or (lambda point: None)
+        self.ensure_recovery = recovery or self._ensure_recovery
         storage.directory(self.root)
         storage.directory(self.root + "/history")
         storage.directory(self.root + "/transactions")
         self.path = self.root + "/operation.json"
+
+    def _ensure_recovery(self):
+        # Import after coordinator initialization: the monitor uses Engine too.
+        __import__("service").ensure_recovery(self.root, self.backup)
 
     def selection(self):
         path = self.root + "/selection.json"
@@ -154,7 +189,7 @@ class Engine(object):
     def pending(self):
         try:
             return storage.read_json(self.path)
-        except IOError as error:
+        except (IOError, OSError) as error:
             if error.errno == errno.ENOENT:
                 return None
             raise
@@ -209,6 +244,8 @@ class Engine(object):
     def _write_map(self, target, operation):
         profiles.validate_map(self.backup, target)
         expected = self._check()
+        if expected != target:
+            self.ensure_recovery()
         for port in profiles.PORTS:
             key = str(port)
             if expected[key] == target[key]:
@@ -362,6 +399,9 @@ class Engine(object):
             }
             self._save(operation, "prepared")
             try:
+                # Even a no-op trial needs independent recovery if its owner
+                # dies while holding the trial timer with startup disabled.
+                self.ensure_recovery()
                 self._save(operation, "applying")
                 self._write_map(after, operation)
                 if action == "trial":
@@ -395,22 +435,12 @@ class Engine(object):
         require(port in profiles.PORTS, "HDMI 2 is reserved for eARC")
         env = dict(os.environ)
         env["C9_EDID_OPERATION"] = operation_id
-        process = subprocess.Popen(
+        code, output, error = run_controller(
             ["/usr/bin/python", "-B", self.root + "/transaction.py", action, str(port)],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
+            env,
         )
-        timer = threading.Timer(65, process.kill)
-        timer.daemon = True
-        timer.start()
-        try:
-            output, error = process.communicate()
-        finally:
-            timer.cancel()
         require(
-            process.returncode == 0,
+            code == 0,
             "Native controller refused: "
             + (error or output).decode("utf8", "replace")[-1000:],
         )

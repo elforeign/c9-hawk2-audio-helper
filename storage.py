@@ -66,9 +66,15 @@ def write_json(path, value):
 @contextlib.contextmanager
 def lock(path):
     descriptor = os.open(
-        path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600
+        path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0), 0o600
     )
+    acquired = False
     try:
+        # Python 2 descriptors are inheritable by default. A recovery daemon
+        # must not retain its controller's operation lock after exec.
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+        fcntl.fcntl(descriptor, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
         info = os.fstat(descriptor)
         require(
             stat.S_ISREG(info.st_mode)
@@ -77,6 +83,9 @@ def lock(path):
             "Lock must be privately owned, mode 0600",
         )
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        acquired = True
         yield
     finally:
+        if acquired:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)

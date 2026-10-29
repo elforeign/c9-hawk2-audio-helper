@@ -1,7 +1,6 @@
 """Explicit preparation, selection and bounded trials; no import-time TV access."""
 
 from __future__ import print_function
-import argparse
 import json
 import os
 import signal
@@ -28,10 +27,72 @@ FILES = (
 
 
 def ports_argument(value):
-    try:
-        return profiles.parse_ports(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error))
+    return profiles.parse_ports(value)
+
+
+class Arguments(object):
+    pass
+
+
+def parse_arguments(argv):
+    # C9 Python 2.7 omits argparse. Keep a small, strict command grammar;
+    # reject flags/duplicates and HDMI 2 before any TV ownership check.
+    require(argv, "A command is required")
+    if argv[0] in ("-h", "--help"):
+        print("control install --prepare|--enable [--ports 1,3,4] [--adopt-hdmi1-original FILE]\n"
+              "control select|restore PORTS\ncontrol trial PORT [--seconds 1..180] [--foreground]\n"
+              "control enable|disable|recover|status|apply|stop-trial")
+        raise SystemExit(0)
+    result = Arguments()
+    result.action = argv[0]
+    require(result.action in ("install", "select", "restore", "trial", "enable",
+            "disable", "recover", "status", "apply", "stop-trial"), "Unknown command")
+    result.ports, result.port = [1], []
+    result.enable, result.prepare, result.foreground = False, False, False
+    result.adopt_hdmi1_original, result.seconds = None, 180
+    allowed = {"install": ("--prepare", "--enable", "--ports", "--adopt-hdmi1-original"),
+               "trial": ("--seconds", "--foreground")}.get(result.action, ())
+    seen, positional = set(), []
+    tokens = list(argv[1:])
+    while tokens:
+        token = tokens.pop(0)
+        if not token.startswith("--"):
+            positional.append(token)
+            continue
+        pair = token.split("=", 1)
+        flag = pair[0]
+        require(flag in allowed and flag not in seen, "Unknown or duplicate option: " + flag)
+        seen.add(flag)
+        if flag in ("--prepare", "--enable", "--foreground"):
+            require(len(pair) == 1, "Boolean option takes no value")
+            setattr(result, flag[2:], True)
+            continue
+        if len(pair) == 2:
+            value = pair[1]
+        else:
+            require(tokens and not tokens[0].startswith("--"), "Option value required: " + flag)
+            value = tokens.pop(0)
+        require(value, "Empty option value")
+        if flag == "--ports":
+            result.ports = ports_argument(value)
+        elif flag == "--seconds":
+            result.seconds = int(value)
+        else:
+            result.adopt_hdmi1_original = value
+    if result.action == "install":
+        require(result.enable != result.prepare and not positional,
+                "Choose exactly one of --prepare or --enable")
+    elif result.action in ("select", "restore", "trial"):
+        require(len(positional) == 1, "Exactly one input selection is required")
+        if result.action == "trial":
+            result.port = ports_argument(positional[0])
+            require(len(result.port) == 1 and 1 <= result.seconds <= 180,
+                    "Trial needs one input and 1..180 seconds")
+        else:
+            result.ports = ports_argument(positional[0])
+    else:
+        require(not positional, "Unexpected command argument")
+    return result
 
 
 def start_monitor():
@@ -136,10 +197,17 @@ def trial(engine, port, seconds, foreground=False):
         sys.stdout.flush()
         os._exit(0)
     except Exception as error:
+        trace = []
+        frame = sys.exc_info()[2]
+        while frame is not None and len(trace) < 16:
+            trace.append({"file": os.path.basename(frame.tb_frame.f_code.co_filename),
+                          "line": frame.tb_lineno})
+            frame = frame.tb_next
         print(
             json.dumps(
                 {
                     "error": str(error),
+                    "trace": trace,
                     "recovery_journal_retained": bool(engine.pending()),
                 }
             )
@@ -149,31 +217,7 @@ def trial(engine, port, seconds, foreground=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="action")
-    prepare = commands.add_parser("install")
-    mode = prepare.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--prepare", action="store_true")
-    mode.add_argument("--enable", dest="enable", action="store_true")
-    prepare.add_argument("--ports", type=ports_argument, default=[1])
-    prepare.add_argument("--adopt-hdmi1-original")
-    select = commands.add_parser("select")
-    select.add_argument("ports", type=ports_argument)
-    restore = commands.add_parser("restore")
-    restore.add_argument("ports", type=ports_argument)
-    check = commands.add_parser("trial")
-    check.add_argument("port", type=ports_argument)
-    check.add_argument("--seconds", type=int, default=180)
-    check.add_argument("--foreground", action="store_true")
-    for name in ("enable", "disable", "recover", "status", "apply", "stop-trial"):
-        commands.add_parser(name)
-    args = parser.parse_args(argv)
-    require(args.action, "A command is required")
-    if args.action == "trial":
-        require(
-            len(args.port) == 1 and 1 <= args.seconds <= 180,
-            "Trial needs one input and 1..180 seconds",
-        )
+    args = parse_arguments(sys.argv[1:] if argv is None else argv)
     require(
         os.geteuid() == 0 and __debug__,
         "Run on the rooted TV without Python optimization",

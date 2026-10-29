@@ -32,6 +32,23 @@ backup, journal and recovery hook in place. The next boot uses fresh native
 reads and firmware checks to restore the journal's target. It never reuses old
 PIDs, RAM addresses captured from a process, or console terminal state.
 
+Before application or even a no-op timed trial, the coordinator starts an
+independent recovery monitor and requires its readiness record to match the
+backup, boot, PID/start time and installed command. This also works with
+automatic application disabled. If the timed worker exits unexpectedly, the
+monitor retries recovery at two-second intervals after its operation lock is
+released. A missing or mismatched readiness record prevents native writes.
+The CLI worker surviving the SSH caller is a separate check from recovery
+after that worker itself dies; qualification must exercise both.
+Lock descriptors are close-on-exec, and child commands close unrelated
+descriptors. A recovery daemon must never inherit its controller's operation
+lock: Python 2 would otherwise keep it locked after that controller dies.
+
+The minimal C9 Python omits `threading` and `argparse`. Controller deadlines
+use a scoped POSIX alarm while retaining direct-child ownership. An existing
+alarm causes refusal rather than being replaced. The runtime CLI has a strict
+internal parser; the offline candidate-generation tool runs on a computer.
+
 The startup hook runs when a journal or disable request exists even without
 `enabled`. Recovery waits until the TV is Active. If a firmware fingerprint,
 EDID or preservation check fails, it stops. Do not edit the journal, erase its

@@ -5,7 +5,9 @@ import ast
 import copy
 import hashlib
 import io
+import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -112,6 +114,7 @@ class FakeTV:
             clock=lambda: self.seconds,
             sleep=self.sleep,
             fault=fault,
+            recovery=lambda: None,
         )
 
 
@@ -129,6 +132,58 @@ class MultiportTests(unittest.TestCase):
         storage.write_json(
             str(self.root / "selection.json"), coordinator.configuration(ports)
         )
+
+    def test_small_cli_rejects_invalid_flags_before_tv_access(self):
+        for argv in [[], ['unknown'], ['install'], ['install', '--prepare', '--enable'],
+                     ['trial', '3', '--seconds', '181'], ['trial', '2'],
+                     ['trial', '3', '--seconds', '5', '--seconds', '6'],
+                     ['apply', '--ports', '3'], ['status', 'unexpected'],
+                     ['install', '--prepare', '--adopt-hdmi1-original']]:
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
+                control.parse_arguments(argv)
+        args = control.parse_arguments(['install', '--prepare', '--ports=1,3'])
+        self.assertEqual(args.ports, [1, 3])
+        self.assertFalse(args.enable)
+        args = control.parse_arguments(['trial', '4', '--seconds', '90', '--foreground'])
+        self.assertEqual((args.port, args.seconds, args.foreground), ([4], 90, True))
+
+    def test_posix_controller_timeout_is_bounded_and_restores_handler(self):
+        before = signal.getsignal(signal.SIGALRM)
+        started = time.monotonic()
+        code, output, error = coordinator.run_controller(
+            [sys.executable, '-c', 'import time;time.sleep(10)'], dict(os.environ), 1)
+        self.assertNotEqual(code, 0)
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual(signal.getsignal(signal.SIGALRM), before)
+        self.assertEqual(signal.alarm(0), 0)
+
+    def test_controller_does_not_steal_an_existing_alarm(self):
+        signal.alarm(10)
+        try:
+            with mock.patch.object(subprocess, 'Popen') as launch:
+                with self.assertRaisesRegex(ValueError, 'existing alarm'):
+                    coordinator.run_controller(['unused'], dict(os.environ))
+                launch.assert_not_called()
+            self.assertGreater(signal.alarm(0), 0)
+        finally:
+            signal.alarm(0)
+
+    def test_python2_style_descriptors_do_not_leak_locks_to_exec_children(self):
+        original_open = os.open
+
+        def inheritable_open(*args, **kwargs):
+            descriptor = original_open(*args, **kwargs)
+            os.set_inheritable(descriptor, True)
+            return descriptor
+
+        path = str(self.root / 'close-on-exec.lock')
+        with mock.patch.object(os, 'open', side_effect=inheritable_open):
+            with storage.lock(path):
+                # Re-open a probe only to find the inode; it owns no lock.
+                value = os.stat(path)
+                code = 'import os,sys\nfound=False\nfor fd in range(3,128):\n try:\n  s=os.fstat(fd);found=found or (s.st_dev,s.st_ino)==%r\n except OSError:pass\nsys.exit(1 if found else 0)' % ((value.st_dev,value.st_ino),)
+                result = subprocess.run([sys.executable, '-c', code], close_fds=False)
+                self.assertEqual(result.returncode, 0)
 
     def test_port_two_invalid_empty_and_duplicate_selection(self):
         for invalid in ("2", "1,2,3", "0", "5", "1,1", "3.0", [True], [8]):
@@ -279,6 +334,62 @@ class MultiportTests(unittest.TestCase):
         )
         self.assertIsNone(self.engine.pending())
 
+    def test_independent_recovery_is_ready_before_any_native_write(self):
+        ready = []
+        self.engine.ensure_recovery = lambda: ready.append(True)
+        original = self.tv.native
+
+        def native(action, port, operation):
+            self.assertTrue(ready, 'No native write without recovery readiness')
+            original(action, port, operation)
+
+        self.engine.backend = native
+        self.engine.run('trial', [3], 1)
+        self.assertEqual(self.tv.values, self.tv.backup['edids'])
+
+    def test_recovery_readiness_failure_prevents_native_write(self):
+        def refused():
+            raise RuntimeError('Recovery not ready')
+
+        self.engine.ensure_recovery = refused
+        with self.assertRaisesRegex(RuntimeError, 'Recovery not ready'):
+            self.engine.run('trial', [3], 1)
+        self.assertEqual(self.tv.writes, [])
+        self.assertIsNone(self.engine.pending())
+
+    def test_noop_trial_also_requires_an_independent_monitor(self):
+        self.tv.values['1'] = profiles.candidates(self.tv.backup)['1']
+        ready = mock.Mock()
+        self.engine.ensure_recovery = ready
+        self.engine.run('trial', [1], 1)
+        ready.assert_called()
+        self.assertEqual(self.tv.writes, [])
+
+    def test_monitor_bootstrap_waits_for_verified_readiness(self):
+        ready = {'pid': 100}
+        with mock.patch.object(service, 'recovery_ready', side_effect=[None, None, ready]), mock.patch.object(
+            service.subprocess, 'check_call'
+        ) as hook, mock.patch.object(coordinator, 'monotonic', side_effect=[0, 0, 1]), mock.patch('time.sleep'):
+            service.ensure_recovery(str(self.root), self.tv.backup)
+        hook.assert_called_once()
+
+    def test_monitor_bootstrap_fails_closed_when_readiness_never_arrives(self):
+        with mock.patch.object(service, 'recovery_ready', return_value=None), mock.patch.object(
+            service.subprocess, 'check_call'
+        ), mock.patch.object(coordinator, 'monotonic', side_effect=[0, 9]):
+            with self.assertRaisesRegex(RuntimeError, 'did not become ready'):
+                service.ensure_recovery(str(self.root), self.tv.backup)
+
+    def test_monitor_readiness_rejects_a_wrong_backup(self):
+        value = {'boot_id': 'test-boot', 'pid': 123, 'started': '456', 'protocol': 1,
+                 'root': str(self.root), 'backup_id': 'wrong'}
+        process_stat = '123 (python) ' + ' '.join(['0'] * 19 + ['456'])
+        command = (str(self.root) + '/service.py\0daemon\0').encode()
+        with mock.patch.object(storage, 'read_json', return_value=value), mock.patch.object(
+            coordinator, 'boot_id', return_value='test-boot'
+        ), mock.patch('builtins.open', side_effect=[io.StringIO(process_stat), io.BytesIO(command)]):
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                service.recovery_ready(str(self.root), self.tv.backup)
     def test_power_loss_in_trial_recovers_working_one_without_enabling_three(self):
         self.tv.values["1"] = profiles.candidates(self.tv.backup)["1"]
         before = dict(self.tv.values)

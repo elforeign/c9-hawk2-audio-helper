@@ -10,10 +10,19 @@ backup. It cannot restore a professional calibration after a factory reset.
 Glasshouse's Settings backup is separate and also does not include professional
 picture calibration. See [backup scope](docs/BACKUP-SCOPE.md).
 
-The earlier single-TV implementation passed audible PCM 5.1 and Atmos trials
-on HDMI 1 of an OLED65C9PUA, webOS 4.10.2, firmware 05.50.00. **This generalized
-installer and multi-port coordinator have only offline validation. HDMI 3 and
-4 have not been written or playback-tested on hardware.** They remain opt-in.
+On an OLED65C9PUA, webOS 4.10.2, firmware 05.50.00, the owner confirmed
+audible DTS-HD-to-PCM 5.1 and Dolby Atmos with the Panasonic UB820 connected
+directly to HDMI 1. Separate bounded runtime trials on HDMI 3 and 4 also
+produced audible Multichannel PCM 5.1 and retained Dolby Atmos. Each trial
+restored the exact four-input preimage, verified native console cleanup and
+preservation checks, and resumed the existing HDMI 1 monitor.
+
+**The generalized helper has passed C9 preparation, Python 2.7 synthetic
+fixtures and no-op worker-termination recovery. Combined multi-input application,
+single-input restoration while other overrides are active, and generalized
+startup/standby/reboot behavior still need hardware qualification.** HDMI 3 and
+4 remain opt-in; only HDMI 1 uses the existing persistent implementation.
+Discrete channel routing was not independently tested.
 Only the two exact firmware fingerprints in `state.py`, HAWK2/TrueHD hardware
 declarations and the measured 29-file calibration layout are accepted.
 
@@ -53,6 +62,12 @@ and file/directory fsync. Originals are never regenerated or overwritten.
 Schema-one backups are validated and adapted in memory without rewriting them.
 The startup hook runs for pending recovery even if automatic application is
 disabled. Recovery waits for an Active TV; it never wakes it.
+
+Every application and timed trial requires a matching independent monitor
+readiness record before native access. With startup disabled, the monitor
+still restores a trial's preimage if its worker dies. The C9 runtime uses a
+scoped POSIX controller timeout and a strict internal CLI parser because its
+minimal Python omits `threading` and `argparse`.
 
 The native writer uses diagnostic-console **runtime menu 5** and the selected
 logical port's `/tmp/edid_N.bin`. It does not use flash-download or raw I2C.
