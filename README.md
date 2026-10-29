@@ -202,7 +202,12 @@ High Resolution 7.1 track on Tron: Legacy UHD: Panasonic reported PCM 7.1 at
 48 kHz, Sonos reported Multichannel PCM 7.1, and sound was normal. Exact working 5.1 preimage restoration, all-port readback, native console cleanup and calibration/OLED preservation passed afterward; the original monitor resumed. This is a
 playback/negotiation result, not proof of discrete channel routing, DTS-HD
 Master Audio lossless output, or native-app decoding. The default and normal
-startup profile remain PCM 5.1. An eight-channel InfoFrame or upmixed 5.1 track
+startup profile remain PCM 5.1. Separate trials retained Dolby Atmos and
+normal sound from the English Tron UHD track, and normal sound from I, Robot's
+DTS-HD Master Audio 5.1 track. For I, Robot the player and Sonos both reported
+PCM 7.1 at 48 kHz despite the 5.1 source; the extra-channel content is not
+established. Each trial restored and verified the exact working preimage.
+An eight-channel InfoFrame or upmixed 5.1 track
 does not establish correct 7.1 routing.
 
 Glasshouse's read-only Audio diagnostics are in

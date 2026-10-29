@@ -26,8 +26,15 @@ Combined apply, single-port restore with other profiles active, and generalized
 reboot/standby/input-switch reliability remain pending. A separate explicit HDMI 1 PCM 7.1 trial subsequently produced normal sound
 with Panasonic PCM 7.1 at 48 kHz and Sonos Multichannel PCM 7.1 from Tron:
 Legacy UHD's German DTS-HD High Resolution 7.1 track. Discrete routing and
-Master Audio lossless output were not established. Native-app DTS remains
-untested. Do not replace a
+Master Audio lossless output were not established. A second bounded trial
+retained Dolby Atmos with normal sound from the same disc’s English track.
+A third trial used I, Robot's DTS-HD Master Audio 5.1 source: the owner
+confirmed normal sound, Panasonic PCM 7.1 at 48 kHz and Sonos Multichannel
+PCM 7.1. Thus playback remained audible, but the output channel count changed.
+Extra-channel content, padding/upmixing and discrete routing are unestablished.
+All three trials restored the exact working map, verified native console
+cleanup and preservation, and resumed the legacy monitor. Native-app DTS
+remains untested. Do not replace a
 working service while away from the TV.
 
 1. Preserve the existing working HDMI 1 implementation, original EDID and
