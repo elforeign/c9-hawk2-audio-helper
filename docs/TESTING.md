@@ -33,9 +33,13 @@ confirmed normal sound, Panasonic PCM 7.1 at 48 kHz and Sonos Multichannel
 PCM 7.1. Thus playback remained audible, but the output channel count changed.
 Extra-channel content, padding/upmixing and discrete routing are unestablished.
 All three trials restored the exact working map, verified native console
-cleanup and preservation, and resumed the legacy monitor. Native-app DTS
-remains untested. Do not replace a
-working service while away from the TV.
+cleanup and preservation, and resumed the legacy monitor. A separate native
+Photo & Video test then produced audible DTS Surround 5.1 on Sonos from a
+generated 48 kHz DTS-core sample at encoder rate 1,509,750 bps. A 1,536,000 bps
+sample was silent; AAC control played as Dolby Digital 2.0. Native DTS-HD,
+DTS:X and exact framing-failure cause remain unqualified. See NATIVE-DTS.md.
+The normal HDMI 1 PCM 5.1 picture and sound were owner-confirmed after cleanup.
+Do not replace a working service while away from the TV.
 
 1. Preserve the existing working HDMI 1 implementation, original EDID and
    verified calibration backup off the TV. Review migration and recovery first.

@@ -215,3 +215,11 @@ Glasshouse's read-only Audio diagnostics are in
 The G5 compressed-DTS forwarding work in
 [PR 1007](https://github.com/rorygallagher2024/glasshouse/pull/1007)
 is independent and supplies no C9 or Sonos DTS-HD/DTS:X decoder.
+
+## Native TV player observation
+
+A separate native Photo & Video test on this C9 delivered audible DTS core 5.1
+to Sonos, without installing a codec or changing TV sound settings. A first
+generated sample was silent while a lower-frame-size sample worked; see the
+[format-specific results and limits](docs/NATIVE-DTS.md). This is separate from
+the HDMI PCM workaround and does not qualify native DTS-HD or DTS:X.
