@@ -8,6 +8,7 @@ from edid import build_candidate, parse, require
 PORTS = (1, 3, 4)
 ALL_PORTS = ("1", "2", "3", "4")
 PROFILE = "pcm51-48k"
+TRIAL_PROFILE = "pcm71-48k"
 try:
     STRING_TYPES = (basestring,)
 except NameError:
@@ -100,13 +101,44 @@ def backup_id(backup):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf8")).hexdigest()
 
 
-def validate_map(backup, current):
+def experimental_policy(backup, operation):
+    """Only a bounded HDMI 1 trial journal can authorize eight-channel bytes."""
+    if operation is None or "trial_profile" not in operation:
+        require(operation is None or "trial_port" not in operation,
+                "Trial input requires an explicit profile")
+        return None
+    require(operation.get("trial_profile") == TRIAL_PROFILE
+            and operation.get("trial_port") == 1
+            and operation.get("action") == "trial"
+            and operation.get("decision") == "rollback",
+            "Eight-channel profile is an HDMI 1 rollback-only trial")
+    validate_map(backup, operation["before"])
+    require(operation["config_before"] == operation["config_after"],
+            "A trial cannot change the persistent selection")
+    expected = dict(operation["before"])
+    expected["1"] = trial_candidate(backup, 1, TRIAL_PROFILE)
+    require(operation["after"] == expected, "Unexpected eight-channel trial target")
+    return TRIAL_PROFILE
+
+
+def trial_candidate(backup, port, profile):
+    require(port in PORTS, "HDMI 2 is reserved for eARC")
+    require(profile == PROFILE or (profile == TRIAL_PROFILE and port == 1),
+            "Experimental PCM 7.1 is trial-only on HDMI 1")
+    return hexbytes(build_candidate(decode(backup["edids"][str(port)]),
+                                    channels=8 if profile == TRIAL_PROFILE else 6))
+
+
+def validate_map(backup, current, experimental=None):
     require(set(current) == set(ALL_PORTS), "Expected all four input readbacks")
+    require(experimental in (None, TRIAL_PROFILE), "Unknown trial policy")
     built = candidates(backup)
     for port in ALL_PORTS:
+        allowed = [backup["edids"][port]] + ([built[port]] if port in built else [])
+        if experimental == TRIAL_PROFILE and port == "1":
+            allowed.append(trial_candidate(backup, 1, TRIAL_PROFILE))
         require(
-            current[port]
-            in [backup["edids"][port]] + ([built[port]] if port in built else []),
+            current[port] in allowed,
             "Unrecognized HDMI %s EDID; no write permitted" % port,
         )
     return current
@@ -121,9 +153,11 @@ def selected_map(backup, ports):
     return result
 
 
-def native_action(backup, port, value):
+def native_action(backup, port, value, experimental=None):
     require(port in PORTS, "HDMI 2 is reserved for eARC")
     if value == backup["edids"][str(port)]:
         return "restore"
+    if experimental == TRIAL_PROFILE and port == 1 and value == trial_candidate(backup, 1, TRIAL_PROFILE):
+        return "trial71"
     require(value == candidates(backup)[str(port)], "Unrecognized native target")
     return "apply"

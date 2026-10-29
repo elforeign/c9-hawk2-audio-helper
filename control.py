@@ -40,7 +40,7 @@ def parse_arguments(argv):
     require(argv, "A command is required")
     if argv[0] in ("-h", "--help"):
         print("control install --prepare|--enable [--ports 1,3,4] [--adopt-hdmi1-original FILE]\n"
-              "control select|restore PORTS\ncontrol trial PORT [--seconds 1..180] [--foreground]\n"
+              "control select|restore PORTS\ncontrol trial PORT [--seconds 1..180] [--foreground] [--profile pcm71-48k]\n"
               "control enable|disable|recover|status|apply|stop-trial")
         raise SystemExit(0)
     result = Arguments()
@@ -50,8 +50,9 @@ def parse_arguments(argv):
     result.ports, result.port = [1], []
     result.enable, result.prepare, result.foreground = False, False, False
     result.adopt_hdmi1_original, result.seconds = None, 180
+    result.trial_profile = profiles.PROFILE
     allowed = {"install": ("--prepare", "--enable", "--ports", "--adopt-hdmi1-original"),
-               "trial": ("--seconds", "--foreground")}.get(result.action, ())
+               "trial": ("--seconds", "--foreground", "--profile")}.get(result.action, ())
     seen, positional = set(), []
     tokens = list(argv[1:])
     while tokens:
@@ -77,6 +78,8 @@ def parse_arguments(argv):
             result.ports = ports_argument(value)
         elif flag == "--seconds":
             result.seconds = int(value)
+        elif flag == "--profile":
+            result.trial_profile = value
         else:
             result.adopt_hdmi1_original = value
     if result.action == "install":
@@ -88,6 +91,9 @@ def parse_arguments(argv):
             result.port = ports_argument(positional[0])
             require(len(result.port) == 1 and 1 <= result.seconds <= 180,
                     "Trial needs one input and 1..180 seconds")
+            require(result.trial_profile == profiles.PROFILE or
+                    (result.trial_profile == profiles.TRIAL_PROFILE and result.port == [1]),
+                    "Experimental PCM 7.1 is trial-only on HDMI 1")
         else:
             result.ports = ports_argument(positional[0])
     else:
@@ -167,9 +173,9 @@ def status():
     return result
 
 
-def trial(engine, port, seconds, foreground=False):
+def trial(engine, port, seconds, foreground=False, trial_profile=profiles.PROFILE):
     if foreground:
-        return engine.run("trial", [port], seconds)
+        return engine.run("trial", [port], seconds, trial_profile=trial_profile)
     pid = os.fork()
     if pid:
         return {
@@ -192,7 +198,7 @@ def trial(engine, port, seconds, foreground=False):
     os.close(null)
     os.close(log)
     try:
-        result = engine.run("trial", [port], seconds)
+        result = engine.run("trial", [port], seconds, trial_profile=trial_profile)
         print(json.dumps(result))
         sys.stdout.flush()
         os._exit(0)
@@ -255,7 +261,7 @@ def main(argv=None):
     if args.action == "restore":
         return engine.run("restore", args.ports)
     if args.action == "trial":
-        return trial(engine, args.port[0], args.seconds, args.foreground)
+        return trial(engine, args.port[0], args.seconds, args.foreground, args.trial_profile)
     return engine.run("apply")
 
 

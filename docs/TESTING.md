@@ -23,8 +23,11 @@ before an owner observation; a separate repeated trial supplied the result.
 The generalized helper is prepared with startup disabled and selection HDMI 1.
 The original HDMI 1 implementation remains responsible for normal startup.
 Combined apply, single-port restore with other profiles active, and generalized
-reboot/standby/input-switch reliability remain pending. Native-app DTS and true
-PCM 7.1 playback remain separate, untested investigations. Do not replace a
+reboot/standby/input-switch reliability remain pending. A separate explicit HDMI 1 PCM 7.1 trial subsequently produced normal sound
+with Panasonic PCM 7.1 at 48 kHz and Sonos Multichannel PCM 7.1 from Tron:
+Legacy UHD's German DTS-HD High Resolution 7.1 track. Discrete routing and
+Master Audio lossless output were not established. Native-app DTS remains
+untested. Do not replace a
 working service while away from the TV.
 
 1. Preserve the existing working HDMI 1 implementation, original EDID and
@@ -74,3 +77,19 @@ these tests. Built-in TV apps and PCM 7.1 are separate investigations; this
 helper does not add DTS-HD decoding to them. Share a redacted pass/fail table,
 source model/settings, firmware version and audio format; keep private data
 out of issues and PRs.
+
+## Experimental eight-channel profile
+
+The six-channel profile remains the only persistent selection. Before the
+explicit HDMI 1 `--profile pcm71-48k` trial, repeat native Python fixtures and
+no-op worker-termination recovery using the updated installed source. Confirm
+all inputs and preservation equal the working preimage, old/new writer
+coordination, independent monitor readiness and no pending native cleanup.
+Verify the eight-channel candidate derives from the immutable original and
+preserves every non-audio block. During the bounded trial, record both the
+player's output rate/channel count and Sonos Audio In with audible sound.
+Restore and verify the exact working six-channel preimage; never promote the
+trial to startup based on a movie format label alone. Repeat known 5.1 and
+Atmos sources under separate bounded trials, then use a real channel-ID source
+to investigate discrete routing. High Resolution and Master Audio are separate
+source formats and must be labelled accurately.

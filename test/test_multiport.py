@@ -85,7 +85,8 @@ class FakeTV:
             raise AssertionError("HDMI2 must never reach a writer")
         self.writes.append((action, port))
         self.values[str(port)] = (
-            profiles.candidates(self.backup)[str(port)]
+            profiles.trial_candidate(self.backup, port, profiles.TRIAL_PROFILE)
+            if action == "trial71" else profiles.candidates(self.backup)[str(port)]
             if action == "apply"
             else self.backup["edids"][str(port)]
         )
@@ -275,6 +276,108 @@ class MultiportTests(unittest.TestCase):
         self.engine.run("trial", [1], seconds=1)
         self.assertEqual(self.tv.writes, [])
         self.assertEqual(self.tv.values["1"], profiles.candidates(self.tv.backup)["1"])
+
+    def test_experimental_trial_restores_working_pcm51_and_other_inputs(self):
+        self.tv.values["1"] = profiles.candidates(self.tv.backup)["1"]
+        self.tv.values["3"] = profiles.candidates(self.tv.backup)["3"]
+        before = dict(self.tv.values)
+        seen = []
+        def observe(point):
+            if point == "trial-active":
+                seen.append(dict(self.tv.values))
+        self.tv.engine(self.root, observe).run("trial", [1], 1, profiles.TRIAL_PROFILE)
+        self.assertEqual(seen[0]["1"], profiles.trial_candidate(self.tv.backup, 1, profiles.TRIAL_PROFILE))
+        self.assertEqual(self.tv.values, before)
+        self.assertEqual(self.tv.writes, [("trial71", 1), ("apply", 1)])
+        self.assertEqual(self.engine.selection(), coordinator.configuration([1]))
+
+    def test_experimental_native_failure_restores_exact_working_preimage(self):
+        self.tv.values["1"] = profiles.candidates(self.tv.backup)["1"]
+        before = dict(self.tv.values)
+        failed = []
+        def refuse(action, port):
+            if action == "trial71" and not failed:
+                failed.append(True)
+                raise RuntimeError("synthetic experimental native failure")
+        self.tv.failure = refuse
+        with self.assertRaisesRegex(RuntimeError, "experimental native failure"):
+            self.engine.run("trial", [1], 1, profiles.TRIAL_PROFILE)
+        self.assertEqual(self.tv.values, before)
+        self.assertIsNone(self.engine.pending())
+        self.assertEqual(self.tv.writes, [("trial71", 1), ("apply", 1)])
+
+    def test_experimental_worker_death_recovers_on_same_boot_or_after_reboot(self):
+        for reboot in (False, True):
+            with self.subTest(reboot=reboot):
+                self.tv.values["1"] = profiles.candidates(self.tv.backup)["1"]
+                before = dict(self.tv.values)
+                def crash(point):
+                    if point == "trial-active":
+                        raise PowerLoss()
+                with self.assertRaises(PowerLoss):
+                    self.tv.engine(self.root, crash).run("trial", [1], 1, profiles.TRIAL_PROFILE)
+                if reboot:
+                    self.tv.reboot()
+                self.tv.engine(self.root).recover()
+                self.assertEqual(self.tv.values, before)
+                self.assertIsNone(self.engine.pending())
+
+    def test_eight_channel_bytes_require_the_specific_pending_trial(self):
+        self.tv.values["1"] = profiles.trial_candidate(self.tv.backup, 1, profiles.TRIAL_PROFILE)
+        with self.assertRaisesRegex(ValueError, "Unrecognized"):
+            self.engine.run("apply")
+        self.assertEqual(self.tv.writes, [])
+
+    def test_experimental_profile_cannot_be_selected_applied_or_used_on_other_ports(self):
+        for action, ports in [("apply", [1]), ("restore", [1]), ("disable", [1]),
+                              ("trial", [3]), ("trial", [4]), ("trial", [2])]:
+            with self.subTest(action=action, ports=ports), self.assertRaises(ValueError):
+                self.engine.run(action, ports, 1, profiles.TRIAL_PROFILE)
+        with self.assertRaises(ValueError):
+            coordinator.validate_configuration({"format_version": 1, "profiles": {"1": profiles.TRIAL_PROFILE}})
+        for args in [["apply", "--profile", profiles.TRIAL_PROFILE],
+                     ["trial", "3", "--profile", profiles.TRIAL_PROFILE],
+                     ["trial", "1", "--profile", "unknown"]]:
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                control.parse_arguments(args)
+        parsed = control.parse_arguments(["trial", "1", "--profile", profiles.TRIAL_PROFILE])
+        self.assertEqual(parsed.trial_profile, profiles.TRIAL_PROFILE)
+        self.assertEqual(self.tv.writes, [])
+
+    def test_experimental_journal_cannot_commit_or_change_another_input(self):
+        def crash(point):
+            if point == "prepared":
+                raise PowerLoss()
+        with self.assertRaises(PowerLoss):
+            self.tv.engine(self.root, crash).run("trial", [1], 1, profiles.TRIAL_PROFILE)
+        original_operation = self.engine.pending()
+        for mutate in (lambda op: op.update(decision="commit"),
+                       lambda op: op.update(action="apply"),
+                       lambda op: op.update(trial_port=3),
+                       lambda op: op["after"].update({"3": profiles.candidates(self.tv.backup)["3"]}),
+                       lambda op: op["config_after"].update(profiles={"3": profiles.PROFILE})):
+            value = copy.deepcopy(original_operation)
+            mutate(value)
+            storage.write_json(str(self.root / "operation.json"), value)
+            with self.assertRaises(ValueError):
+                self.engine.recover()
+        storage.write_json(str(self.root / "operation.json"), original_operation)
+        self.engine.recover()
+        self.assertEqual(self.tv.writes, [])
+
+    def test_experimental_native_staging_accepts_exact_preimage_and_target_only(self):
+        source = (pathlib.Path(control.__file__).parent / "transaction.py").read_text()
+        function = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "file_for_load")
+        allowed = [original(1), edid.build_candidate(original(1)), edid.build_candidate(original(1), 8)]
+        namespace = {"PORT": 1, "ALLOWED": allowed, "storage": storage,
+                     "open": mock.mock_open(read_data=allowed[2])}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "native-stage", "exec"), namespace)
+        with mock.patch.object(storage, "atomic_bytes") as stage:
+            namespace["file_for_load"](allowed[2])
+            stage.assert_called_once_with("/tmp/edid_1.bin", allowed[2])
+            with self.assertRaises(AssertionError):
+                namespace["file_for_load"](b"untrusted")
 
     def test_trial_bound_and_single_port_validation(self):
         for ports, seconds in [([3, 4], 1), ([3], 181), ([3], 0), ([3], 1.5)]:
@@ -551,6 +654,7 @@ class MultiportTests(unittest.TestCase):
             "PORT": 3,
             "ORIGINAL": b"original",
             "CANDIDATE": b"candidate",
+            "ALLOWED": [b"original", b"candidate"],
             "storage": storage,
             "open": mock.mock_open(read_data=b"candidate"),
         }
@@ -714,7 +818,7 @@ class MultiportTests(unittest.TestCase):
 import control,time,json,pathlib
 class Engine:
  root=ROOT
- def run(self,*args):
+ def run(self,*args,**kwargs):
   time.sleep(.1)
   pathlib.Path(self.root,'detached-finished').write_text('restored')
   return {'verified':True}

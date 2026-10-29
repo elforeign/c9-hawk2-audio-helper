@@ -15,8 +15,8 @@ from coordinator import native_quiescent, boot_id
 
 # Reject HDMI 2 before firmware, process or console access.
 require(
-    len(sys.argv) == 3 and sys.argv[1] in ["apply", "restore"],
-    "Internal usage: transaction.py apply|restore PORT",
+    len(sys.argv) == 3 and sys.argv[1] in ["apply", "restore", "trial71"],
+    "Internal usage: transaction.py apply|restore|trial71 PORT",
 )
 action = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -38,6 +38,9 @@ require(
     "Native write requires the active coordinated journal",
 )
 BASE = __import__("state").BASE
+policy = profiles.experimental_policy(backup, operation)
+profiles.validate_map(backup, operation["before"])
+profiles.validate_map(backup, operation["after"], policy)
 require(
     native_quiescent(BASE, backup, boot_id()), "Previous console session needs recovery"
 )
@@ -315,8 +318,11 @@ def collect(seconds):
 
 ORIGINAL = binascii.unhexlify(backup["edids"][str(PORT)])
 CANDIDATE = build_candidate(ORIGINAL)
+ALLOWED = [ORIGINAL, CANDIDATE]
+if policy == profiles.TRIAL_PROFILE and PORT == 1:
+    ALLOWED.append(build_candidate(ORIGINAL, channels=8))
 EXPECTED_PRESERVATION = backup["preservation"]
-for data in [ORIGINAL, CANDIDATE]:
+for data in ALLOWED:
     assert (
         len(data) == 256
         and sum(bytearray(data[:128])) % 256 == 0
@@ -419,7 +425,7 @@ def preserved():
 
 
 before_edids = all_edids()
-profiles.validate_map(backup, before_edids)
+profiles.validate_map(backup, before_edids, policy)
 BEFORE_TARGET = binascii.unhexlify(before_edids[str(PORT)])
 before_preserved = preserved()
 assert before_preserved == EXPECTED_PRESERVATION, (
@@ -433,7 +439,7 @@ with open(guard + "/candidate.bin", "wb") as f:
 
 
 def file_for_load(data):
-    assert data in [ORIGINAL, CANDIDATE]
+    assert data in ALLOWED
     path = "/tmp/edid_%d.bin" % PORT
     # The journal is persistent but /tmp is a different filesystem on the TV.
     # Stage beside the destination; renaming out of guard would fail with EXDEV.
@@ -491,7 +497,7 @@ def leave_console():
     status = restore_ram()
     detach = send("tmgr elogout")
     if os.path.exists(("/tmp/edid_%d.bin" % PORT)):
-        assert open(("/tmp/edid_%d.bin" % PORT), "rb").read() in [ORIGINAL, CANDIDATE]
+        assert open(("/tmp/edid_%d.bin" % PORT), "rb").read() in ALLOWED
         os.unlink(("/tmp/edid_%d.bin" % PORT))
     return {
         "ram_restoration": status,
@@ -500,7 +506,11 @@ def leave_console():
     }
 
 
-TARGET = CANDIDATE if action == "apply" else ORIGINAL
+TARGET = profiles.decode(operation[
+    "after" if operation["phase"] == "applying" or operation.get("decision") == "commit"
+    else "before"][str(PORT)])
+require(TARGET in ALLOWED and action == profiles.native_action(backup, PORT, profiles.hexbytes(TARGET), policy),
+        "Native action differs from coordinated target")
 expected_after = dict(before_edids)
 expected_after[str(PORT)] = TARGET.encode("hex")
 require(
@@ -657,7 +667,7 @@ try:
     send("tmgr efg 1")
     send("tmgr stdout unlock")
     out["menu_entry"] = enter_edid()
-    if action == "apply":
+    if action in ("apply", "trial71"):
         assert (
             read_state("com.webos.service.tvpower/power/getPowerState", {})["state"]
             == "Active"

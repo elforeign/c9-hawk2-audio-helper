@@ -171,7 +171,7 @@ python3 -m unittest discover -s test -p 'test_*.py'
 Offline tests do not qualify firmware console behavior, HDMI 3/4 routing,
 audible channel mapping or standby/reboot reliability on hardware.
 
-## Separate 7.1 investigation
+## Experimental HDMI 1 PCM 7.1 trial
 
 `prepare-trial.py` can build a private **offline-only** eight-channel candidate:
 
@@ -183,10 +183,27 @@ python3 prepare-trial.py \
 
 It connects to no TV. The output directory must not exist. It contains a
 manifest, the six-channel fallback and `TRIAL-NOT-INSTALLED-pcm71.bin`.
-The live coordinator accepts only `pcm51-48k`; it cannot install that trial.
-A future 7.1 implementation needs independently verified preimage recovery and
-true discrete channel-identification listening tests. An eight-channel
-InfoFrame or upmixed 5.1 track does not establish correct 7.1 routing.
+After qualifying recovery and the working six-channel preimage, the live
+coordinator can run an explicit HDMI 1 trial:
+
+```sh
+/var/lib/glasshouse-c9-edid/control trial 1 --seconds 180 --profile pcm71-48k
+```
+
+This profile cannot be selected, applied persistently or used on HDMI 2, 3 or
+4. The durable trial journal admits its exact derived bytes only for HDMI 1,
+requires a rollback decision and unchanged persistent selection, and restores
+the exact pretrial map. Without that journal, eight-channel candidate bytes
+are rejected. The independent monitor and native preimage watchdog remain
+required. Pause any legacy writer through the migration procedure first.
+
+On the measured C9/UB820/Sonos Arc setup, the owner tested the German DTS-HD
+High Resolution 7.1 track on Tron: Legacy UHD: Panasonic reported PCM 7.1 at
+48 kHz, Sonos reported Multichannel PCM 7.1, and sound was normal. Exact working 5.1 preimage restoration, all-port readback, native console cleanup and calibration/OLED preservation passed afterward; the original monitor resumed. This is a
+playback/negotiation result, not proof of discrete channel routing, DTS-HD
+Master Audio lossless output, or native-app decoding. The default and normal
+startup profile remain PCM 5.1. An eight-channel InfoFrame or upmixed 5.1 track
+does not establish correct 7.1 routing.
 
 Glasshouse's read-only Audio diagnostics are in
 [PR 1081](https://github.com/rorygallagher2024/glasshouse/pull/1081).

@@ -194,13 +194,14 @@ class Engine(object):
                 return None
             raise
 
-    def _check(self):
+    def _check(self, operation=None):
         self.verify()
         require(
             self.preserved() == self.backup["preservation"],
             "Calibration/OLED baseline changed; no write permitted",
         )
-        return profiles.validate_map(self.backup, self.read())
+        return profiles.validate_map(self.backup, self.read(),
+                                     profiles.experimental_policy(self.backup, operation))
 
     def _save(self, operation, phase):
         operation["phase"] = phase
@@ -230,7 +231,8 @@ class Engine(object):
             "Unknown recovery decision",
         )
         profiles.validate_map(self.backup, operation["before"])
-        profiles.validate_map(self.backup, operation["after"])
+        policy = profiles.experimental_policy(self.backup, operation)
+        profiles.validate_map(self.backup, operation["after"], policy)
         validate_configuration(operation["config_before"])
         validate_configuration(operation["config_after"])
         return operation
@@ -242,8 +244,10 @@ class Engine(object):
         )
 
     def _write_map(self, target, operation):
-        profiles.validate_map(self.backup, target)
-        expected = self._check()
+        self._validated(operation)
+        policy = profiles.experimental_policy(self.backup, operation)
+        profiles.validate_map(self.backup, target, policy)
+        expected = self._check(operation)
         if expected != target:
             self.ensure_recovery()
         for port in profiles.PORTS:
@@ -252,28 +256,28 @@ class Engine(object):
                 continue
             require(self.active(), "TV must be Active; recovery remains journaled")
             self._native_safe()
-            require(self._check() == expected, "An input changed during the operation")
+            require(self._check(operation) == expected, "An input changed during the operation")
             operation["inflight_port"] = port
             operation["owner_pid"] = os.getpid()
             operation["owner_started"] = self.identity()
             storage.write_json(self.path, operation)
             self.fault("before-write-%d" % port)
             self.backend(
-                profiles.native_action(self.backup, port, target[key]),
+                profiles.native_action(self.backup, port, target[key], policy),
                 port,
                 operation["id"],
             )
             expected = dict(expected)
             expected[key] = target[key]
             require(
-                self._check() == expected and self.read() == expected,
+                self._check(operation) == expected and self.read() == expected,
                 "Native write/readback mismatch",
             )
             operation["inflight_port"] = None
             storage.write_json(self.path, operation)
             self.fault("after-write-%d" % port)
         require(
-            self._check() == target and self.read() == target,
+            self._check(operation) == target and self.read() == target,
             "Final input preservation check failed",
         )
 
@@ -284,7 +288,7 @@ class Engine(object):
             return None
         self._validated(operation)
         self._native_safe()
-        self._check()
+        self._check(operation)
         committed = operation["decision"] == "commit"
         if (
             not committed
@@ -341,9 +345,12 @@ class Engine(object):
         storage.write_json(self.root + "/selection.json", configuration(ports))
         return {"state": "selection saved; no hardware write", "ports": ports}
 
-    def run(self, action, ports=None, seconds=180):
+    def run(self, action, ports=None, seconds=180, trial_profile=profiles.PROFILE):
         require(action in ("apply", "restore", "trial", "disable"), "Unknown operation")
         chosen = profiles.parse_ports(ports if ports is not None else profiles.PORTS)
+        require(trial_profile == profiles.PROFILE or
+                (action == "trial" and chosen == [1] and trial_profile == profiles.TRIAL_PROFILE),
+                "Experimental PCM 7.1 is trial-only on HDMI 1")
         require(
             action != "trial"
             or (len(chosen) == 1 and type(seconds) is int and 1 <= seconds <= 180),
@@ -373,7 +380,7 @@ class Engine(object):
                         ]
                     )
             else:
-                after[str(chosen[0])] = profiles.candidates(self.backup)[str(chosen[0])]
+                after[str(chosen[0])] = profiles.trial_candidate(self.backup, chosen[0], trial_profile)
             if action == "trial":
                 require(
                     not os.path.exists(self.root + "/disable-requested"),
@@ -397,6 +404,9 @@ class Engine(object):
                 "inflight_port": None,
                 "decision": "rollback",
             }
+            if trial_profile == profiles.TRIAL_PROFILE:
+                operation.update(trial_profile=trial_profile, trial_port=1)
+            self._validated(dict(operation, phase="prepared"))
             self._save(operation, "prepared")
             try:
                 # Even a no-op trial needs independent recovery if its owner

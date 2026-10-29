@@ -106,3 +106,11 @@ wait for all originals to be verified and all journals resolved, then use the
 previous implementation's already verified apply/enable procedure. Never
 switch ownership by deleting a recovery journal. Glasshouse updates are
 separate: preserve any local owner write-policy guard when upgrading its core.
+
+An experimental `pcm71-48k` trial is rollback-only on HDMI 1. Its journal must
+retain `trial_profile`, `trial_port`, both exact maps and the unchanged
+persistent selection. Recovery accepts eight-channel bytes only through that
+validated journal and returns to its preimage, including an existing working
+six-channel override. Do not delete the journal or reinstall an older helper
+that cannot recognize it while the trial is pending. This profile cannot be
+saved for automatic startup.
