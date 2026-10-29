@@ -17,12 +17,15 @@ produced audible Multichannel PCM 5.1 and retained Dolby Atmos. Each trial
 restored the exact four-input preimage, verified native console cleanup and
 preservation checks, and resumed the existing HDMI 1 monitor.
 
-**The generalized helper has passed C9 preparation, Python 2.7 synthetic
-fixtures and no-op worker-termination recovery. Combined multi-input application,
-single-input restoration while other overrides are active, and generalized
-startup/standby/reboot behavior still need hardware qualification.** HDMI 3 and
-4 remain opt-in; only HDMI 1 uses the existing persistent implementation.
-Discrete channel routing was not independently tested.
+**The generalized helper has now passed combined HDMI 1/3/4 application,
+single-input restoration with the other profiles active, full disable/restore,
+automatic application after a normal reboot and standby/deep-wake, source
+reconnection, input switching and CEC volume control on this C9.** Preparation,
+Python 2.7 synthetic fixtures and no-op worker-termination recovery also passed.
+The final installation enables only HDMI 1 through this helper; the legacy
+service is disabled and HDMI 2/3/4 retain their originals. HDMI 3/4 remain opt-in.
+These are observations on one TV/source/soundbar combination, not a guarantee
+for other systems. Discrete channel routing was not independently tested.
 Only the two exact firmware fingerprints in `state.py`, HAWK2/TrueHD hardware
 declarations and the measured 29-file calibration layout are accepted.
 

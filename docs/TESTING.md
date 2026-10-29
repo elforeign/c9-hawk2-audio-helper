@@ -20,10 +20,31 @@ unchanged calibration/OLED checks, no pending operation and the legacy monitor
 resumed. HDMI 2 was never a write target. The first HDMI 4 DTS window expired
 before an owner observation; a separate repeated trial supplied the result.
 
-The generalized helper is prepared with startup disabled and selection HDMI 1.
-The original HDMI 1 implementation remains responsible for normal startup.
-Combined apply, single-port restore with other profiles active, and generalized
-reboot/standby/input-switch reliability remain pending. A separate explicit HDMI 1 PCM 7.1 trial subsequently produced normal sound
+The generalized helper subsequently completed the combined and startup checks:
+
+| Check | Result |
+| --- | --- |
+| Apply six-channel profiles to HDMI 1/3/4 together | All four EDIDs verified; HDMI 2 unchanged; HDMI 1 PCM 5.1 audible |
+| Restore HDMI 3, then HDMI 4 | Each original restored while other applied profiles remained intact |
+| Asynchronous disable | All four originals verified, then the working selection reapplied |
+| Normal TV reboot | New monitor autonomously reapplied all three selected profiles; owner confirmed PCM 5.1 and Atmos |
+| Source unplug/replug and input switching | Atmos returned normally; Sonos responded to LG remote volume |
+| Standby/deep-wake | Automatic OLED maintenance was left uninterrupted; after owner wake a new boot/monitor autonomously reapplied all three profiles |
+| Final cleanup | Only HDMI 1 selected and enabled; HDMI 2/3/4 original; legacy service disabled; no pending operation |
+
+All-port reads, native-console cleanup, 29 calibration-file preservation checks,
+18 factory-white-balance readings and OLED protection comparisons passed.
+Standby/wake reapplication was verified through the committed operation history
+and the subsequent restore's exact preimage; another owner listening test after
+that final cleanup was not requested. The first qualification harness allowed
+only 12 seconds for a monitor with a 30-second interval and timed out before
+restart. Baseline recovery passed; a 45-second wait then completed the handoff.
+This was a harness timing correction, not a runtime helper code change.
+Independent guardian/worker-termination proofs used zero native EDID writes;
+power loss during a write was not tested. All observations concern this one
+OLED65C9PUA / UB820 / Sonos Arc system.
+
+A separate explicit HDMI 1 PCM 7.1 trial produced normal sound
 with Panasonic PCM 7.1 at 48 kHz and Sonos Multichannel PCM 7.1 from Tron:
 Legacy UHD's German DTS-HD High Resolution 7.1 track. Discrete routing and
 Master Audio lossless output were not established. A second bounded trial
