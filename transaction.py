@@ -7,12 +7,43 @@ from state import (
     luna as read_state,
     stop_unfinished_controller,
 )
-from edid import build_candidate
+from edid import build_candidate, require
+import profiles
+import storage
+import uuid
+from coordinator import native_quiescent, boot_id
 
-# Fingerprints are checked before reading or writing fixed console addresses.
-verify_firmware()
-assert len(sys.argv) == 2 and sys.argv[1] in ["apply", "restore"]
+# Reject HDMI 2 before firmware, process or console access.
+require(
+    len(sys.argv) == 3 and sys.argv[1] in ["apply", "restore", "trial71"],
+    "Internal usage: transaction.py apply|restore|trial71 PORT",
+)
 action = sys.argv[1]
+PORT = int(sys.argv[2])
+require(
+    PORT in profiles.PORTS, "HDMI 2 is reserved for eARC; only 1, 3 and 4 are writable"
+)
+verify_firmware()
+__import__("state").no_competing_service()
+backup = load_backup()
+operation = storage.read_json(__import__("state").BASE + "/operation.json")
+require(
+    operation["id"] == os.environ.get("C9_EDID_OPERATION")
+    and operation["backup_id"] == profiles.backup_id(backup)
+    and operation.get("inflight_port") == PORT
+    and operation["owner_pid"] == os.getppid()
+    and operation["owner_started"]
+    == open("/proc/%d/stat" % os.getppid()).read().rsplit(")", 1)[1].split()[19]
+    and operation["phase"] in ["applying", "recovering"],
+    "Native write requires the active coordinated journal",
+)
+BASE = __import__("state").BASE
+policy = profiles.experimental_policy(backup, operation)
+profiles.validate_map(backup, operation["before"])
+profiles.validate_map(backup, operation["after"], policy)
+require(
+    native_quiescent(BASE, backup, boot_id()), "Previous console session needs recovery"
+)
 lockfd = os.open("/tmp/c9-hdmi1-audio.transaction.lock", os.O_CREAT | os.O_RDWR, 0o600)
 fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -285,12 +316,13 @@ def collect(seconds):
     return data.decode("utf-8", "replace")
 
 
-backup = load_backup()
-ORIGINAL = binascii.unhexlify(backup["edids"]["1"])
+ORIGINAL = binascii.unhexlify(backup["edids"][str(PORT)])
 CANDIDATE = build_candidate(ORIGINAL)
-EXPECTED_EDIDS = backup["edids"]
+ALLOWED = [ORIGINAL, CANDIDATE]
+if policy == profiles.TRIAL_PROFILE and PORT == 1:
+    ALLOWED.append(build_candidate(ORIGINAL, channels=8))
 EXPECTED_PRESERVATION = backup["preservation"]
-for data in [ORIGINAL, CANDIDATE]:
+for data in ALLOWED:
     assert (
         len(data) == 256
         and sum(bytearray(data[:128])) % 256 == 0
@@ -299,19 +331,17 @@ for data in [ORIGINAL, CANDIDATE]:
 out["read_only_hardware"] = False
 parent_pid = os.getpid()
 parent_started = identity(parent_pid)
-guard = "/tmp/glasshouse-c9-edid-txn-%d" % parent_pid
-assert not os.path.exists("/tmp/edid_1.bin"), (
+transaction_id = uuid.uuid4().hex
+guard = BASE + "/transactions/" + transaction_id
+storage.directory(BASE + "/transactions")
+assert not os.path.exists(("/tmp/edid_%d.bin" % PORT)), (
     "Existing native EDID file; refusing to overwrite"
 )
 os.mkdir(guard, 0o700)
 
 
 def putjson(name, value):
-    path = guard + "/" + name
-    tmp = path + ".tmp.%d" % os.getpid()
-    with open(tmp, "w") as f:
-        json.dump(value, f, sort_keys=True)
-    os.rename(tmp, path)
+    storage.write_json(guard + "/" + name, value)
 
 
 def luna(uri, payload):
@@ -395,8 +425,8 @@ def preserved():
 
 
 before_edids = all_edids()
-assert before_edids["1"] in [ORIGINAL.encode("hex"), CANDIDATE.encode("hex")]
-assert all(before_edids[p] == EXPECTED_EDIDS[p] for p in ["2", "3", "4"])
+profiles.validate_map(backup, before_edids, policy)
+BEFORE_TARGET = binascii.unhexlify(before_edids[str(PORT)])
 before_preserved = preserved()
 assert before_preserved == EXPECTED_PRESERVATION, (
     "Calibration/protection baseline changed; no write permitted"
@@ -409,26 +439,24 @@ with open(guard + "/candidate.bin", "wb") as f:
 
 
 def file_for_load(data):
-    assert data in [ORIGINAL, CANDIDATE]
-    path = "/tmp/edid_1.bin"
-    tmp = guard + "/edid-next.bin"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.chmod(tmp, 0o600)
-    os.rename(tmp, path)
+    assert data in ALLOWED
+    path = "/tmp/edid_%d.bin" % PORT
+    # The journal is persistent but /tmp is a different filesystem on the TV.
+    # Stage beside the destination; renaming out of guard would fail with EXDEV.
+    storage.atomic_bytes(path, data)
     assert open(path, "rb").read() == data
 
 
 def menu_load(data, label):
-    # Only menu 5, port 1; file checked before the firmware's unchecked fread.
+    # Only menu 5 and an allowlisted logical input; no HDMI2 file or command.
     assert readword(mode["pid"], mode["address"]) == 5
     file_for_load(data)
     key(b"5\n")
     prompt = collect(0.4)
     assert "Enter HDMI port(1~4)" in prompt, (label, prompt[-600:])
-    key(b"1\n")
+    key(("%d\n" % PORT).encode("ascii"))
     reply = collect(1)
-    actual = edid(1)
+    actual = edid(PORT)
     tail = collect(0.2)
     log = {
         "label": label,
@@ -468,9 +496,9 @@ def leave_console():
     collect(0.5)
     status = restore_ram()
     detach = send("tmgr elogout")
-    if os.path.exists("/tmp/edid_1.bin"):
-        assert open("/tmp/edid_1.bin", "rb").read() in [ORIGINAL, CANDIDATE]
-        os.unlink("/tmp/edid_1.bin")
+    if os.path.exists(("/tmp/edid_%d.bin" % PORT)):
+        assert open(("/tmp/edid_%d.bin" % PORT), "rb").read() in ALLOWED
+        os.unlink(("/tmp/edid_%d.bin" % PORT))
     return {
         "ram_restoration": status,
         "detach": detach,
@@ -478,9 +506,22 @@ def leave_console():
     }
 
 
-TARGET = CANDIDATE if action == "apply" else ORIGINAL
+TARGET = profiles.decode(operation[
+    "after" if operation["phase"] == "applying" or operation.get("decision") == "commit"
+    else "before"][str(PORT)])
+require(TARGET in ALLOWED and action == profiles.native_action(backup, PORT, profiles.hexbytes(TARGET), policy),
+        "Native action differs from coordinated target")
 expected_after = dict(before_edids)
-expected_after["1"] = TARGET.encode("hex")
+expected_after[str(PORT)] = TARGET.encode("hex")
+require(
+    operation[
+        "after"
+        if operation["phase"] == "applying" or operation.get("decision") == "commit"
+        else "before"
+    ][str(PORT)]
+    == TARGET.encode("hex"),
+    "Target differs from coordinated intent",
+)
 if before_edids == expected_after:
     print(
         json.dumps(
@@ -490,6 +531,7 @@ if before_edids == expected_after:
                 "verified": True,
                 "guard_directory": guard,
                 "edid_sha256": hashlib.sha256(TARGET).hexdigest(),
+                "port": PORT,
                 "no_hardware_write": True,
             }
         )
@@ -500,6 +542,17 @@ if before_edids == expected_after:
     sys.exit(0)
 worker_started = False
 mode = None
+storage.write_json(
+    BASE + "/native-pending.json",
+    {
+        "backup_id": profiles.backup_id(backup),
+        "transaction_id": transaction_id,
+        "boot_id": boot_id(),
+        "port": PORT,
+        "controller_pid": parent_pid,
+        "controller_started": parent_started,
+    },
+)
 try:
     out["queries"].append(send("tmgr elogin " + term))
     assert out["queries"][-1]["reply_bytes"] == 1032
@@ -573,7 +626,7 @@ try:
         except Exception as e:
             result["error"] = str(e)
             result["committed"] = False
-            # Roll back to the immutable original through the same verified native route.
+            # Restore this input's preimage, including an already working override.
             try:
                 send("tmgr elogin " + term)
                 send("tmgr efg 1")
@@ -582,13 +635,10 @@ try:
                 collect(0.6)
                 enter_edid()
                 result["rollback_load"] = menu_load(
-                    ORIGINAL, "failed-transaction-restore"
+                    BEFORE_TARGET, "failed-transaction-restore-preimage"
                 )
-                expected_original = dict(before_edids)
-                expected_original["1"] = ORIGINAL.encode("hex")
-                result["original_restored"] = (
-                    all_edids() == expected_original
-                    and all_edids() == expected_original
+                result["before_restored"] = (
+                    all_edids() == before_edids and all_edids() == before_edids
                 )
             except Exception as rollback_error:
                 result["rollback_error"] = str(rollback_error)
@@ -617,7 +667,7 @@ try:
     send("tmgr efg 1")
     send("tmgr stdout unlock")
     out["menu_entry"] = enter_edid()
-    if action == "apply":
+    if action in ("apply", "trial71"):
         assert (
             read_state("com.webos.service.tvpower/power/getPowerState", {})["state"]
             == "Active"
@@ -625,8 +675,8 @@ try:
     out["target"] = menu_load(TARGET, "target")
     assert all_edids() == expected_after
     assert preserved() == before_preserved
-    # Leave an original recovery file in place until the worker commits/cleans up.
-    file_for_load(ORIGINAL)
+    # Leave this input's preimage in place until the worker commits/cleans up.
+    file_for_load(BEFORE_TARGET)
     putjson("controller.json", out)
     putjson(
         "handoff.json",
@@ -639,6 +689,8 @@ try:
                 "action": action,
                 "guard_directory": guard,
                 "worker_pid": worker,
+                "transaction_id": transaction_id,
+                "port": PORT,
             }
         )
     )
@@ -657,7 +709,7 @@ except Exception as e:
     print(
         json.dumps(
             {
-                "status": "Failed; original recovery requested",
+                "status": "Failed; preimage recovery requested",
                 "guard_directory": guard,
                 "error": str(e),
             }

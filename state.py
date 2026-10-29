@@ -1,15 +1,19 @@
-"""Private per-TV backup and read-only firmware/preservation checks."""
+"""Private per-TV EDID rollback data and read-only integrity checks.
+
+The integrity snapshot is not a restorable picture-calibration archive.
+"""
 
 from __future__ import print_function
 import glob
 import hashlib
 import json
 import os
-import stat
 import signal
 import subprocess
 import time
 from edid import as_bytes, build_candidate, parse, require
+import profiles
+import storage
 
 BASE = "/var/lib/glasshouse-c9-edid"
 PROFILE = "c9-hawk2-05.50.00"
@@ -45,6 +49,13 @@ def verify_firmware():
         require(file_hash(path) == digest, "Unvalidated firmware: " + path)
 
 
+def no_competing_service():
+    require(
+        not os.path.exists("/var/lib/c9-hdmi1-audio/enabled"),
+        "The legacy HDMI1 service is still enabled; coordinate migration first",
+    )
+
+
 def luna(uri, payload):
     require(uri in READ_METHODS, "Read method not allowed")
     process = subprocess.Popen(
@@ -64,6 +75,7 @@ def luna(uri, payload):
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        close_fds=True,
     )
     raw = process.stdout.read()
     process.stderr.read()
@@ -116,27 +128,12 @@ def preserved():
 
 
 def load_backup():
-    path = BASE + "/backup.json"
-    info = os.lstat(path)
-    require(
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == 0
-        and stat.S_IMODE(info.st_mode) == 0o600,
-        "Backup must be a root-owned regular file with mode 0600",
-    )
-    with open(path) as source:
-        backup = json.load(source)
+    backup = storage.read_json(BASE + "/backup.json")
     require(
         backup.get("profile") == PROFILE and backup.get("binary_hashes") == PINS,
         "Backup profile mismatch",
     )
-    original = __import__("binascii").unhexlify(backup["edids"]["1"])
-    candidate = build_candidate(original)
-    require(
-        hashlib.sha256(candidate).hexdigest() == backup["candidate_sha256"],
-        "Candidate checksum mismatch",
-    )
-    return backup
+    return profiles.normalize_backup(backup)
 
 
 def stop_unfinished_controller(pid, started):
@@ -156,7 +153,7 @@ def stop_unfinished_controller(pid, started):
         os.kill(pid, signal.SIGKILL)
 
 
-def capture():
+def capture(adopt_hdmi1_original=None):
     verify_firmware()
     require(
         not os.path.lexists(BASE),
@@ -177,27 +174,44 @@ def capture():
         first == read_edids() and snapshot == preserved(),
         "Backup changed during capture",
     )
-    original = __import__("binascii").unhexlify(first["1"])
+    originals = dict(first)
+    if adopt_hdmi1_original:
+        # Only an explicit matching original can adopt an existing working 5.1
+        # override; the TV's calibration is always read afresh and preserved.
+        with open(adopt_hdmi1_original, "rb") as source:
+            original = source.read()
+        require(
+            first["1"] == profiles.hexbytes(build_candidate(original)),
+            "Supplied HDMI1 original does not match the observed 5.1 override",
+        )
+        originals["1"] = profiles.hexbytes(original)
+    else:
+        original = profiles.decode(first["1"])
     candidate = build_candidate(original)
     backup = {
         "profile": PROFILE,
         "binary_hashes": PINS,
-        "edids": first,
+        "format_version": 2,
+        "edids": originals,
+        "observed_at_capture": first,
         "preservation": snapshot,
         "candidate_sha256": hashlib.sha256(candidate).hexdigest(),
         "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    os.mkdir(BASE, 0o700)
-    for name, data in [
-        ("original-hdmi1.bin", original),
-        ("candidate-hdmi1.bin", candidate),
-    ]:
-        with open(BASE + "/" + name, "wb") as output:
-            output.write(data)
-        os.chmod(BASE + "/" + name, 0o600)
-    with open(BASE + "/backup.json", "w") as output:
-        json.dump(backup, output, sort_keys=True)
-    os.chmod(BASE + "/backup.json", 0o600)
+    built = profiles.candidates(backup)
+    backup["candidate_sha256s"] = {
+        port: hashlib.sha256(profiles.decode(value)).hexdigest()
+        for port, value in built.items()
+    }
+    profiles.normalize_backup(backup)
+    storage.directory(BASE)
+    for port in profiles.PORTS:
+        for label, data in [
+            ("original", profiles.decode(originals[str(port)])),
+            ("candidate", profiles.decode(built[str(port)])),
+        ]:
+            storage.atomic_bytes(BASE + "/%s-hdmi%d.bin" % (label, port), data)
+    storage.write_json(BASE + "/backup.json", backup)
     print(
         json.dumps(
             {

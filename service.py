@@ -1,211 +1,207 @@
+"""One monitor for selected inputs; recovery runs even with startup disabled."""
+
 from __future__ import print_function
-import os, sys, json, time, subprocess, hashlib, fcntl
-from state import BASE, verify_firmware, load_backup
-import binascii
+import errno
+import os
+import sys
+import subprocess
+import coordinator
+import profiles
+import state
+import storage
 
-verify_firmware()
-backup = load_backup()
 RUN = "/tmp/glasshouse-c9-edid"
-ORIGINAL = hashlib.sha256(binascii.unhexlify(backup["edids"]["1"])).hexdigest()
-CANDIDATE = backup["candidate_sha256"]
 
 
-def utc():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def writejson(path, value):
-    tmp = path + ".tmp.%d" % os.getpid()
-    with open(tmp, "w") as f:
-        json.dump(value, f, sort_keys=True)
-    os.chmod(tmp, 0o600)
-    os.rename(tmp, path)
-
-
-def report(state, **kw):
-    r = {
-        "state": state,
-        "utc": utc(),
-        "boot_id": open("/proc/sys/kernel/random/boot_id").read().strip(),
-        "pid": os.getpid(),
-    }
-    r.update(kw)
-    writejson(RUN + "/status.json", r)
-    print(json.dumps(r))
-    sys.stdout.flush()
-
-
-def luna(uri, payload):
-    assert uri in [
-        "com.webos.service.tvpower/power/getPowerState",
-        "com.webos.service.tv.systemproperty/getEdidData",
-    ]
-    p = subprocess.Popen(
-        [
-            "timeout",
-            "-t",
-            "4",
-            "luna-send",
-            "-w",
-            "2500",
-            "-n",
-            "1",
-            "-f",
-            "luna://" + uri,
-            json.dumps(payload),
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    raw = p.stdout.read()
-    err = p.stderr.read()
-    p.wait()
-    p.stdin.close()
-    assert p.returncode == 0, err
-    r = json.loads(raw)
-    assert r.get("returnValue") is True, r
-    return r
-
-
-def current():
-    d = luna(
-        "com.webos.service.tv.systemproperty/getEdidData",
-        {"inputType": 0, "portNumber": 1},
-    )["edidData"]
-    assert d["length"] == 256
-    b = "".join(chr(x) for x in d["data"])
-    assert sum(bytearray(b[:128])) % 256 == sum(bytearray(b[128:])) % 256 == 0
-    return hashlib.sha256(b).hexdigest()
-
-
-def transaction(action):
-    p = subprocess.Popen(
-        ["/usr/bin/python", BASE + "/transaction.py", action],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    out, err = p.communicate()
-    assert p.returncode == 0, (p.returncode, err[-1000:], out[-1000:])
-    r = json.loads(out)
-    if r.get("no_hardware_write"):
-        assert r.get("verified")
-        return r
-    guard = r["guard_directory"]
-    assert guard.startswith("/tmp/glasshouse-c9-edid-txn-")
-    deadline = time.time() + 65
-    while time.time() < deadline:
-        if os.path.isfile(guard + "/result.json"):
-            result = json.load(open(guard + "/result.json"))
-            assert result.get("committed") and result.get("verified"), result
-            result["guard_directory"] = guard
-            return result
-        time.sleep(0.2)
-    raise RuntimeError("Native transaction recovery result timed out; no retries")
-
-
-if not os.path.isdir(RUN):
-    os.mkdir(RUN, 0o700)
-assert len(sys.argv) == 2 and sys.argv[1] in ["daemon", "disable", "status"]
-action = sys.argv[1]
-if action == "status":
-    print(
-        open(RUN + "/status.json").read()
-        if os.path.exists(RUN + "/status.json")
-        else '{"state":"not started"}'
-    )
-    sys.exit(0)
-if action == "disable":
-    if os.path.exists(BASE + "/enabled"):
-        os.unlink(BASE + "/enabled")
-    # The daemon releases this lock after seeing the marker disappear.
-    lock = os.open(RUN + "/daemon.lock", os.O_CREAT | os.O_RDWR, 0o600)
-    deadline = time.time() + 40
-    locked = False
-    while time.time() < deadline:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-            break
-        except IOError:
-            time.sleep(0.2)
-    assert locked, "Service still busy; wait and run disable again"
-    verify_firmware()
-    result = transaction("restore")
-    assert current() == ORIGINAL
-    report("disabled; original verified", result=result)
-    sys.exit(0)
-lock = os.open(RUN + "/daemon.lock", os.O_CREAT | os.O_RDWR, 0o600)
-try:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except IOError:
-    sys.exit(0)
-report("waiting for active TV")
-attempts = 0
-stable_original = 0
-last_attempt = 0
-last_state = None
-# Read-only polling: writes are allowed only for the exact original HDMI1 EDID.
-# At most three applications per boot and at least five minutes apart.
-while os.path.isfile(BASE + "/enabled"):
-    in_transaction = False
+def recovery_ready(root, backup):
     try:
-        power = luna("com.webos.service.tvpower/power/getPowerState", {})["state"]
-        if power != "Active":
-            stable_original = 0
-            if last_state != "inactive":
-                report("waiting; TV is not active", power=power)
-                last_state = "inactive"
-        else:
-            digest = current()
-            if digest == CANDIDATE:
-                stable_original = 0
-                if last_state != "active":
-                    report(
-                        "active; verified candidate",
-                        edid_sha256=digest,
-                        applications_this_boot=attempts,
-                    )
-                    last_state = "active"
-            elif digest == ORIGINAL:
-                stable_original += 1
-                if stable_original >= 2 and time.time() - last_attempt >= 300:
-                    assert attempts < 3, (
-                        "Reapplication limit reached; refusing repeated interruptions"
-                    )
-                    attempts += 1
-                    last_attempt = time.time()
-                    report("applying", attempt=attempts)
-                    in_transaction = True
-                    result = transaction("apply")
-                    assert current() == CANDIDATE
-                    in_transaction = False
-                    report(
-                        "active; verified candidate",
-                        edid_sha256=CANDIDATE,
-                        applications_this_boot=attempts,
-                        result=result,
-                    )
-                    last_state = "active"
-                    stable_original = 0
-            else:
-                raise RuntimeError(
-                    "Unexpected HDMI1 EDID; refusing to overwrite " + digest
+        value = storage.read_json(RUN + "/ready.json")
+    except (IOError, OSError) as error:
+        if error.errno == errno.ENOENT:
+            return None
+        raise
+    if value.get("boot_id") != coordinator.boot_id():
+        return None
+    pid = value.get("pid")
+    if type(pid) is not int or pid <= 1:
+        raise ValueError("Invalid recovery monitor identity")
+    try:
+        with open("/proc/%d/stat" % pid) as source:
+            fields = source.read().rsplit(")", 1)[1].split()
+            if fields[0] == "Z":
+                return None
+            started = fields[19]
+        with open("/proc/%d/cmdline" % pid, "rb") as source:
+            command = source.read().split(b"\0")
+    except (IOError, OSError) as error:
+        if error.errno == errno.ENOENT:
+            return None
+        raise
+    if started != value.get("started"):
+        return None
+    if (
+        value.get("protocol") != 1
+        or value.get("root") != root
+        or value.get("backup_id") != profiles.backup_id(backup)
+        or (root + "/service.py").encode("utf8") not in command
+        or b"daemon" not in command
+    ):
+        raise ValueError("Recovery monitor does not match this installation")
+    return value
+
+
+def ensure_recovery(root, backup):
+    if recovery_ready(root, backup):
+        return
+    # The operation journal already exists, so the recovery hook starts even
+    # if automatic profile application has never been enabled.
+    subprocess.check_call(["/var/lib/webosbrew/init.d/60-glasshouse-c9-edid"], close_fds=True)
+    deadline = coordinator.monotonic() + 8
+    while coordinator.monotonic() < deadline:
+        if recovery_ready(root, backup):
+            return
+        __import__("time").sleep(0.05)
+    raise RuntimeError("Independent recovery monitor did not become ready; no native write")
+
+
+def report(value):
+    storage.directory(RUN)
+    value = dict(value, boot_id=coordinator.boot_id(), pid=os.getpid())
+    storage.write_json(RUN + "/status.json", value)
+
+
+def daemon():
+    storage.directory(RUN)
+    try:
+        with storage.lock(RUN + "/daemon.lock"):
+            engine = coordinator.Engine()
+            ready = {
+                "protocol": 1,
+                "root": engine.root,
+                "backup_id": profiles.backup_id(engine.backup),
+                "boot_id": coordinator.boot_id(),
+                "pid": os.getpid(),
+                "started": coordinator.process_identity(),
+            }
+            storage.write_json(RUN + "/ready.json", ready)
+            try:
+                return monitor(engine)
+            finally:
+                os.unlink(RUN + "/ready.json")
+                storage.sync_directory(RUN)
+    except (IOError, OSError) as error:
+        if error.errno in (errno.EACCES, errno.EAGAIN):
+            return 0
+        raise
+
+
+def monitor(engine):
+    attempts = 0
+    last_attempt = -1000
+    prior = None
+    stable = 0
+    last_status = None
+    while (
+        os.path.exists(engine.root + "/enabled")
+        or os.path.isfile(engine.root + "/operation.json")
+        or os.path.exists(engine.root + "/disable-requested")
+    ):
+        mutating = False
+        try:
+            if not engine.active():
+                status = {"state": "waiting for Active TV; recovery retained"}
+                prior, stable = None, 0
+            elif os.path.isfile(engine.root + "/operation.json"):
+                mutating = True
+                result = engine.recover()
+                status = {"state": "recovery verified", "result": result}
+                prior, stable = None, 0
+            elif os.path.exists(engine.root + "/disable-requested"):
+                mutating = True
+                result = engine.run("disable")
+                os.unlink(engine.root + "/disable-requested")
+                storage.sync_directory(engine.root)
+                status = {"state": "disabled; originals verified", "result": result}
+            elif os.path.exists(engine.root + "/enabled"):
+                current = profiles.validate_map(engine.backup, engine.read())
+                desired = profiles.selected_map(
+                    engine.backup, engine.selection()["profiles"].keys()
                 )
-    except Exception as e:
-        # Startup/readiness errors may settle; a native transaction failure must not loop.
-        if in_transaction or isinstance(e, RuntimeError):
-            if os.path.exists(BASE + "/enabled"):
-                os.unlink(BASE + "/enabled")
-            report(
-                "disabled after error; inspect result before re-enabling", error=str(e)
-            )
-            break
-        if last_state != "not-ready":
-            report("waiting for services", error=str(e))
-            last_state = "not-ready"
-    # Short waits allow disable to stop the daemon promptly, even in standby.
-    for unused in range(150):
-        if not os.path.isfile(BASE + "/enabled"):
-            break
-        time.sleep(0.2)
+                if current == desired:
+                    status = {
+                        "state": "selected profiles verified",
+                        "profiles": engine.selection()["profiles"],
+                    }
+                    prior, stable = None, 0
+                else:
+                    stable = stable + 1 if prior == current else 1
+                    prior = current
+                    status = {
+                        "state": "waiting for two stable input reads",
+                        "stable_reads": stable,
+                    }
+                    if stable >= 2 and engine.clock() - last_attempt >= 300:
+                        if attempts >= 3:
+                            raise RuntimeError(
+                                "Three application cycles reached; manual review required"
+                            )
+                        attempts += 1
+                        last_attempt = engine.clock()
+                        mutating = True
+                        result = engine.run("apply")
+                        status = {
+                            "state": "selected profiles verified",
+                            "profiles": engine.selection()["profiles"],
+                            "application_cycles_this_run": attempts,
+                            "result": result,
+                        }
+                        prior, stable = None, 0
+            else:
+                break
+            if status != last_status:
+                report(status)
+                last_status = status
+        except (IOError, OSError) as error:
+            if error.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            # A detached trial owns the operation lock. Do not disable it or
+            # reconcile its temporary EDID back to the persistent selection.
+            if last_status != "busy":
+                report({"state": "coordinated operation in progress"})
+                last_status = "busy"
+        except Exception as error:
+            if (
+                mutating
+                or "Unrecognized" in str(error)
+                or isinstance(error, RuntimeError)
+            ):
+                if os.path.exists(engine.root + "/enabled"):
+                    os.unlink(engine.root + "/enabled")
+                    storage.sync_directory(engine.root)
+                report(
+                    {
+                        "state": "manual recovery required; automatic apply stopped",
+                        "error": str(error),
+                    }
+                )
+                return 1
+            if last_status != "not-ready":
+                report({"state": "waiting for services", "error": str(error)})
+                last_status = "not-ready"
+        # This process exists in standby only to retain a pending recovery.
+        for unused in range(10 if os.path.isfile(engine.root + "/operation.json") else 150):
+            if not (
+                os.path.exists(engine.root + "/enabled")
+                or os.path.isfile(engine.root + "/operation.json")
+                or os.path.exists(engine.root + "/disable-requested")
+            ):
+                break
+            engine.sleep(0.2)
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2 or sys.argv[1] != "daemon":
+        raise SystemExit("Usage: service.py daemon")
+    state.verify_firmware()
+    raise SystemExit(daemon())
